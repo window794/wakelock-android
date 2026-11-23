@@ -71,7 +71,10 @@ data class WakeState(
     // On boot a ringing service needs a new exact delivery, including after escalation.
     fun restoreAt(now: Long): Long? = if (phase.ringing) minOf(nextAlarm ?: Long.MAX_VALUE, now + 1000) else nextAlarm
 
-    private fun token(place: Place) = if (place == Place.BATHROOM) bathroom else kitchen
+    internal fun token(place: Place) = when (place) {
+        Place.BATHROOM -> bathroom
+        Place.KITCHEN -> kitchen
+    }
     fun registered(place: Place) = token(place).isNotEmpty()
 
     fun register(place: Place, raw: String): WakeState {

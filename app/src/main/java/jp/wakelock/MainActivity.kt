@@ -30,6 +30,7 @@ internal fun stamp(ms: Long) = if (ms == 0L) "未設定" else localTime(ms).form
 
 class MainActivity : ComponentActivity() {
     private val vm: WakeViewModel by viewModels()
+    private val qrViewModel: QrViewModel by viewModels()
     private var resumeCount by mutableIntStateOf(0)
     override fun onResume() {
         super.onResume()
@@ -177,15 +178,10 @@ class MainActivity : ComponentActivity() {
                         TextButton(onClick = { back() }) { Text("ホームに戻る") }
                     }
                     register -> {
-                        Heading("QRコード登録")
-                        Place.entries.forEach { p ->
-                            Text("${p.title}　" + if (state.registered(p)) "登録済み" else "未登録")
-                            BigButton(if (state.registered(p)) "${p.title}のQRを変更" else "${p.title}のQRを登録") {
-                                vm.message.value = null
-                                scanning = "reg" + p.name
-                            }
-                        }
-                        TextButton(onClick = { back() }) { Text("ホームに戻る") }
+                        QrManagement(this@MainActivity, state, qrViewModel, scan = { p ->
+                            vm.message.value = null
+                            scanning = "reg" + p.name
+                        }, home = { back() })
                     }
                     else -> {
                         Heading("WakeLock")
@@ -202,7 +198,7 @@ class MainActivity : ComponentActivity() {
                         }
                         BigButton("アラームの日時を設定") { vm.message.value = null; page = "settings" }
                         BigButton("アラーム音・音量の設定") { vm.message.value = null; page = "sound" }
-                        BigButton("QRコード登録") { vm.message.value = null; page = "qr" }
+                        BigButton("QRコード管理") { vm.message.value = null; qrViewModel.notice = ""; page = "qr" }
                         if (BuildConfig.DEBUG) {
                             Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(16.dp)) {

@@ -55,6 +55,11 @@ class WakeController(private val app: Context) {
         applyState(store.change(transform))
     }
 
+    // Registration shares the protocol lock but does not need to reschedule the alarm.
+    internal suspend fun issueQr(place: Place, expected: String) = lock.withLock {
+        store.change { it.issueQr(place, expected) }
+    }
+
     suspend fun deliver(event: AlarmEvent) = lock.withLock {
         if (states.first().event != event) return@withLock
         applyState(store.change { it.fire(event, System.currentTimeMillis()) })
