@@ -12,26 +12,41 @@ class RingService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var player: MediaPlayer? = null
     private var vibrating = false
+    private var checking = false
+    private var latestStart = 0
     private val vibrator by lazy { getSystemService(Vibrator::class.java) }
     private val attributes = AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ALARM)
         .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build()
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        try {
-            startForeground(Alerts.RING_ID, controller.alerts.ring())
-        } catch (_: IllegalStateException) {
-            controller.alerts.ringFallback()
-            stopSelf(startId)
-            return START_NOT_STICKY
-        } catch (_: SecurityException) {
-            controller.alerts.ringFallback()
+        latestStart = startId
+        // On a sticky restart, show the quiet recheck notification until DataStore is loaded.
+        if (!showForeground(intent?.getBooleanExtra(CHECKING, false) ?: true)) {
             stopSelf(startId)
             return START_NOT_STICKY
         }
         scope.launch {
-            if (controller.states.first().phase.ringing) startRinging() else stopSelf(startId)
+            val phase = controller.states.first().phase
+            if (startId != latestStart) return@launch
+            val recheck = phase == Phase.CHECKING
+            if (phase.playsAlarm && (checking == recheck || showForeground(recheck))) startRinging()
+            else stopSelf(startId)
         }
         return START_STICKY
+    }
+
+    private fun showForeground(recheck: Boolean): Boolean {
+        checking = recheck
+        try {
+            if (recheck) startForeground(Alerts.CHECK_ID, controller.alerts.check())
+            else startForeground(Alerts.RING_ID, controller.alerts.ring())
+            return true
+        } catch (_: IllegalStateException) {
+            controller.alerts.ringFallback(recheck)
+        } catch (_: SecurityException) {
+            controller.alerts.ringFallback(recheck)
+        }
+        return false
     }
 
     @Suppress("DEPRECATION")
@@ -62,7 +77,7 @@ class RingService : Service() {
             audio.setOnErrorListener { failed, _, _ ->
                 failed.release()
                 player = null
-                controller.alerts.ringFallback()
+                controller.alerts.ringFallback(checking)
                 true
             }
             player = audio
@@ -71,7 +86,7 @@ class RingService : Service() {
         } catch (_: Exception) {
             audio.release()
             player = null
-            controller.alerts.ringFallback()
+            controller.alerts.ringFallback(checking)
         }
     }
 
@@ -84,4 +99,7 @@ class RingService : Service() {
         super.onDestroy()
     }
     override fun onBind(intent: Intent?) = null
+    companion object {
+        const val CHECKING = "jp.wakelock.extra.CHECKING"
+    }
 }

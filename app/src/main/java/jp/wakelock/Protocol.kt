@@ -9,6 +9,7 @@ enum class Phase {
     AWAITING_RECHECK, CHECKING, COMPLETED, ABORTED;
 
     val ringing get() = this in setOf(ALARM_RINGING, AWAITING_BATHROOM_QR, AWAITING_KITCHEN_QR)
+    val playsAlarm get() = ringing || this == CHECKING
     val active get() = ringing || this == AWAITING_RECHECK || this == CHECKING
 }
 

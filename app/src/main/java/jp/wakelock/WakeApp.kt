@@ -48,12 +48,13 @@ class WakeController(private val app: Context) {
 
     suspend fun restore(fromBroadcast: Boolean) = lock.withLock {
         val current = states.first()
-        if (fromBroadcast && current.phase.ringing) {
+        if (fromBroadcast && current.phase.playsAlarm) {
             // Android 15+ prohibits starting a mediaPlayback FGS from BOOT_COMPLETED.
-            if (exact) setClock(System.currentTimeMillis() + 1000) else alerts.ringFallback()
+            val resumeAt = System.currentTimeMillis() + 1000
+            if (exact) setClock(minOf(current.nextAlarm ?: resumeAt, resumeAt))
+            else alerts.ringFallback(current.phase == Phase.CHECKING)
         } else if (fromBroadcast) {
             setClock(current.nextAlarm)
-            if (current.phase == Phase.CHECKING) alerts.check()
         } else {
             applyState(store.change { it.fire(System.currentTimeMillis()) })
         }
@@ -61,14 +62,15 @@ class WakeController(private val app: Context) {
 
     private fun applyState(state: WakeState) {
         setClock(state.nextAlarm)
-        if (state.phase == Phase.CHECKING) alerts.check() else alerts.clearCheck()
-        if (state.phase.ringing) {
+        if (state.phase.playsAlarm) {
+            val checking = state.phase == Phase.CHECKING
+            val intent = Intent(app, RingService::class.java).putExtra(RingService.CHECKING, checking)
             try {
-                app.startForegroundService(Intent(app, RingService::class.java))
+                app.startForegroundService(intent)
             } catch (_: IllegalStateException) {
-                alerts.ringFallback()
+                alerts.ringFallback(checking)
             } catch (_: SecurityException) {
-                alerts.ringFallback()
+                alerts.ringFallback(checking)
             }
         } else {
             app.stopService(Intent(app, RingService::class.java))

@@ -14,6 +14,15 @@ class ProtocolTest {
     private val waiting = second.verify(Place.KITCHEN, kitchen, 102)
     private val checking = waiting.fire(600102)
 
+    @Test fun recheckSoundsFromThePromptUntilAnsweredOrAborted() {
+        assertFalse(waiting.phase.playsAlarm)
+        assertTrue(checking.phase.playsAlarm)
+        assertFalse(checking.answer(true, 600103).phase.playsAlarm)
+        assertFalse(checking.abort(600103).phase.playsAlarm)
+        assertTrue(checking.answer(false, 600103).phase.playsAlarm)
+        assertTrue(checking.fire(660102).phase.playsAlarm)
+    }
+
     @Test fun validatesWholePayloadAndPlace() {
         for (bad in listOf("", "$bath ", bath.dropLast(1), "$bath:", bath.replace("v1", "v2"), bath.replace("AA", "A+"))) {
             assertThrows(InputError::class.java) { readToken(bad, Place.BATHROOM) }

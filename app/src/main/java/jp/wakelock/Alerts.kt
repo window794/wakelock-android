@@ -42,21 +42,24 @@ class Alerts(private val context: Context) {
     }
 
     fun ring() = notice(RING, "起床時刻です", "タップしてQR認証へ", true)
-    fun check() = post(2, notice(CHECK, "起きていますか？", "60秒以内にタップして回答してください", false))
-    fun ringFallback() = post(3, notice(BACKUP, "アラームを確認してください", "タップしてWakeLockを開いてください", true))
+    fun check() = notice(CHECK, "起きていますか？", "60秒以内にタップして回答してください", false)
+    fun ringFallback(checking: Boolean) = post(3, if (checking)
+        notice(BACKUP, "起きていますか？", "60秒以内にタップして回答してください", false)
+    else notice(BACKUP, "アラームを確認してください", "タップしてWakeLockを開いてください", true))
     private fun post(id: Int, notification: Notification) {
         if (Build.VERSION.SDK_INT < 33 || context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED)
             manager.notify(id, notification)
     }
-    fun clearCheck() = manager.cancel(2)
     fun clearBackup() = manager.cancel(3)
     fun clearRinging() {
-        manager.cancel(1)
+        manager.cancel(RING_ID)
+        manager.cancel(CHECK_ID)
         clearBackup()
     }
 
     companion object {
         const val RING_ID = 1
+        const val CHECK_ID = 2
         private const val RING = "ring"
         private const val CHECK = "check"
         private const val BACKUP = "backup"
