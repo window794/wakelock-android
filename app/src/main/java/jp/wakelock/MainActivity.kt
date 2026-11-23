@@ -83,15 +83,14 @@ class MainActivity : ComponentActivity() {
         var seenCompletion by rememberSaveable { mutableLongStateOf(0L) }
         val complete = phase == Phase.COMPLETED && state.finished != seenCompletion
         val register = !active && page == "qr"
-        val place = Place.entries.find { scanning == (if (register) "reg" else "auth") + it.name }
-        val validPlace = place?.takeIf {
-            register || (it == Place.BATHROOM && phase in setOf(Phase.ALARM_RINGING, Phase.AWAITING_BATHROOM_QR)) ||
-                (it == Place.KITCHEN && phase == Phase.AWAITING_KITCHEN_QR)
-        }
+        val scanStep = StepId(state.generation, if (phase == Phase.INITIAL_ALARM) Phase.AWAITING_BATHROOM_QR else phase)
+        val scanRoute = "auth/${scanStep.generation}/${scanStep.phase.name}"
+        val validPlace = if (register) Place.entries.find { scanning == "reg" + it.name }
+            else phase.place?.takeIf { scanning == scanRoute }
         LaunchedEffect(active) { if (active) page = "home" }
         LaunchedEffect(scanning, validPlace) { if (validPlace == null) scanning = null }
         LaunchedEffect(phase) {
-            lockScreen(phase.ringing || phase == Phase.CHECKING)
+            lockScreen(phase.ringing)
         }
         var permissionTick by remember { mutableIntStateOf(0) }
         val cameraGranted = remember(resumeCount, permissionTick) {
@@ -116,13 +115,15 @@ class MainActivity : ComponentActivity() {
             Column(Modifier.fillMaxSize().safeDrawingPadding().verticalScroll(rememberScrollState()).padding(24.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 if (message != null) Text(message.orEmpty(), color = MaterialTheme.colorScheme.error)
+                if (BuildConfig.DEBUG && state.timing == Timing.SHORT)
+                    Text("デバッグ短時間モード", color = MaterialTheme.colorScheme.tertiary)
                 when {
                     validPlace != null -> {
                         Heading(if (register) "${validPlace.title}を登録" else "${validPlace.title}を認証")
                         if (cameraGranted) {
                             QrScanner(this@MainActivity, validPlace) { raw ->
                                 scanning = null
-                                vm.edit { if (register) it.register(validPlace, raw) else it.verify(validPlace, raw, System.currentTimeMillis()) }
+                                vm.edit { if (register) it.register(validPlace, raw) else it.verify(scanStep, raw, System.currentTimeMillis()) }
                             }
                         } else {
                             Text("QRコードの読み取りにはカメラの許可が必要です。")
@@ -134,33 +135,34 @@ class MainActivity : ComponentActivity() {
                     phase.ringing -> {
                         var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
                         LaunchedEffect(Unit) { while (true) { now = System.currentTimeMillis(); delay(1000) } }
-                        Text("起床プロトコル実行中", style = MaterialTheme.typography.titleLarge)
+                        Text("STEP ${phase.step} / 4　${phase.label}", style = MaterialTheme.typography.titleLarge)
                         Text(localTime(now).format(DateTimeFormatter.ofPattern("HH:mm")), style = MaterialTheme.typography.displayLarge)
-                        val target = if (phase == Phase.AWAITING_KITCHEN_QR) Place.KITCHEN else Place.BATHROOM
-                        val first = target == Place.BATHROOM
-                        Text(if (first) "1 / 2　洗面所へ移動" else "2 / 2　キッチンへ移動", style = MaterialTheme.typography.headlineSmall)
-                        LinearProgressIndicator(progress = { if (first) 0f else 0.5f }, modifier = Modifier.fillMaxWidth())
-                        if (!first) Text("洗面所の認証が完了しました。")
-                        BigButton("${target.title}のQRコードを読む") {
-                            vm.edit(onSaved = { scanning = "auth" + target.name }) { it.beginScan() }
+                        Heading(phase.prompt)
+                        LinearProgressIndicator(progress = { (phase.step - 1) / 4f }, modifier = Modifier.fillMaxWidth())
+                        if (state.escalated) Text("認証を待っています", color = MaterialTheme.colorScheme.error)
+                        BigButton("${phase.place?.title}のQRコードを読む") {
+                            vm.edit(onSaved = { scanning = scanRoute }) { it.beginScan() }
                         }
                     }
-                    phase == Phase.AWAITING_RECHECK -> {
-                        Heading("2地点の認証完了")
-                        Text("アラームを停止しました。起床確認は ${stamp(state.deadline)} です。")
-                        Text("画面を閉じても、確認時刻に通知します。")
-                    }
-                    phase == Phase.CHECKING -> {
-                        Heading("起きていますか？")
-                        Text("60秒以内に回答してください。")
-                        BigButton("起きています") { vm.edit { it.answer(true, System.currentTimeMillis()) } }
-                        BigButton("まだ眠い") { vm.edit { it.answer(false, System.currentTimeMillis()) } }
+                    phase.waiting -> {
+                        val now by produceState(System.currentTimeMillis(), state.deadline) {
+                            while (true) { value = System.currentTimeMillis(); delay(500) }
+                        }
+                        val target = if (phase == Phase.WAITING_FIRST_CHALLENGE) Place.KITCHEN else Place.BATHROOM
+                        Heading(phase.label)
+                        Text("次の確認まで " + durationText((state.deadline - now + 999).coerceAtLeast(0)),
+                            style = MaterialTheme.typography.headlineMedium)
+                        LinearProgressIndicator(progress = { phase.step / 4f }, modifier = Modifier.fillMaxWidth())
+                        Text(if (controller.exact) "次は${target.title}のQR認証です。画面を閉じても起床確認は続きます。"
+                            else "予約は保留中です。下の設定から正確なアラームを許可してください。")
                     }
                     complete -> {
-                        Heading("起床確認完了")
+                        Heading("起床プロトコル完了")
                         Text("アラーム開始　${stamp(state.started)}")
-                        Text("2地点認証完了　${stamp(state.qrDone)}")
-                        Text("最終確認　${stamp(state.finished)}")
+                        Text("初回2地点認証　${stamp(state.qrDone)}")
+                        Text("起床確認・キッチン　${stamp(state.firstDone)}")
+                        Text("最終確認・洗面所　${stamp(state.finished)}")
+                        Text("全体の所要時間　" + if (state.finished >= state.started) durationText(state.finished - state.started) else "端末時刻変更のため不明")
                         BigButton("ホームへ") { back() }
                     }
                     page == "settings" -> {
@@ -182,6 +184,7 @@ class MainActivity : ComponentActivity() {
                     }
                     else -> {
                         Heading("WakeLock")
+                        Text("起床プロトコル　${phase.label}")
                         Text("次のアラーム", style = MaterialTheme.typography.titleMedium)
                         Text(if (state.enabled) stamp(state.date) else "予約なし", style = MaterialTheme.typography.headlineMedium)
                         if (state.enabled && !controller.exact) Text("予約は権限の許可待ちです。", color = MaterialTheme.colorScheme.error)
@@ -194,6 +197,15 @@ class MainActivity : ComponentActivity() {
                         }
                         BigButton("アラームの日時を設定") { vm.message.value = null; page = "settings" }
                         BigButton("QRコード登録") { vm.message.value = null; page = "qr" }
+                        if (BuildConfig.DEBUG) {
+                            Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                                Text("短時間テスト（30秒・20秒）")
+                                Switch(state.timing == Timing.SHORT, { on ->
+                                    vm.edit { it.setTiming(if (on) Timing.SHORT else Timing.NORMAL) }
+                                }, enabled = !state.enabled)
+                            }
+                        }
                         Text(Place.entries.joinToString("　") { it.title + if (state.registered(it)) " ✓" else " 未登録" })
                         if (state.lastAbort != 0L) Text("直近の緊急停止　${stamp(state.lastAbort)}")
                         if (phase == Phase.COMPLETED) TextButton(onClick = { seenCompletion = 0 }) { Text("起床確認結果を見る") }
@@ -237,6 +249,11 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun Heading(text: String) = Text(text, style = MaterialTheme.typography.headlineLarge)
+
+private fun durationText(ms: Long): String {
+    val seconds = ms / 1000
+    return "%02d:%02d".format(seconds / 60, seconds % 60)
+}
 
 @Composable
 fun BigButton(text: String, action: () -> Unit) {

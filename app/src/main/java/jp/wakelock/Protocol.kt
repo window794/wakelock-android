@@ -4,13 +4,27 @@ enum class Place(val wire: String, val title: String) {
     BATHROOM("bathroom", "洗面所"), KITCHEN("kitchen", "キッチン")
 }
 
-enum class Phase {
-    IDLE, ALARM_RINGING, AWAITING_BATHROOM_QR, AWAITING_KITCHEN_QR,
-    AWAITING_RECHECK, CHECKING, COMPLETED, ABORTED;
+enum class Phase(val label: String, val step: Int = 0, val place: Place? = null) {
+    IDLE("待機中"),
+    INITIAL_ALARM("初回アラーム", 1, Place.BATHROOM),
+    AWAITING_BATHROOM_QR("初回認証", 1, Place.BATHROOM),
+    AWAITING_KITCHEN_QR("初回認証", 2, Place.KITCHEN),
+    WAITING_FIRST_CHALLENGE("初回認証完了", 2),
+    FIRST_CHALLENGE_ACTIVE("起床確認", 3, Place.KITCHEN),
+    WAITING_FINAL_CHALLENGE("キッチン再認証完了", 3),
+    FINAL_CHALLENGE_ACTIVE("最終確認", 4, Place.BATHROOM),
+    COMPLETED("起床プロトコル完了", 4),
+    EMERGENCY_STOPPED("緊急停止"),
+    RECOVERY_REQUIRED("予約の再設定が必要です");
 
-    val ringing get() = this in setOf(ALARM_RINGING, AWAITING_BATHROOM_QR, AWAITING_KITCHEN_QR)
-    val playsAlarm get() = ringing || this == CHECKING
-    val active get() = ringing || this == AWAITING_RECHECK || this == CHECKING
+    val waiting get() = this == WAITING_FIRST_CHALLENGE || this == WAITING_FINAL_CHALLENGE
+    val ringing get() = place != null
+    val active get() = waiting || ringing
+    val prompt get() = when (this) {
+        FIRST_CHALLENGE_ACTIVE -> "起床確認：キッチンに移動してください"
+        FINAL_CHALLENGE_ACTIVE -> "最終確認：洗面所に移動してください"
+        else -> place?.let { "${it.title}に移動してください" } ?: label
+    }
 }
 
 class InputError(message: String) : IllegalStateException(message)
@@ -22,6 +36,14 @@ fun readToken(raw: String, expected: Place): String {
     return match.groupValues[2]
 }
 
+enum class Timing(val first: Long, val final: Long, val escalation: Long) {
+    NORMAL(600_000, 300_000, 60_000), SHORT(30_000, 20_000, 15_000)
+}
+
+// An OS delivery or a camera result belongs to a particular run and step.
+data class StepId(val generation: Long, val phase: Phase)
+data class AlarmEvent(val step: StepId, val deadline: Long)
+
 data class WakeState(
     val date: Long = 0,
     val enabled: Boolean = false,
@@ -30,18 +52,27 @@ data class WakeState(
     val kitchen: String = "",
     val started: Long = 0,
     val qrDone: Long = 0,
+    val firstDone: Long = 0,
     val deadline: Long = 0,
     val finished: Long = 0,
-    val lastAbort: Long = 0
+    val lastAbort: Long = 0,
+    val generation: Long = 0,
+    val escalated: Boolean = false,
+    val timing: Timing = Timing.NORMAL
 ) {
+    val stepId get() = StepId(generation, phase)
     val nextAlarm: Long? get() = when {
-        enabled && !phase.active -> date
-        phase == Phase.AWAITING_RECHECK || phase == Phase.CHECKING -> deadline
+        phase == Phase.IDLE && enabled -> date
+        phase.active && deadline > 0 -> deadline
         else -> null
     }
+    val event get() = AlarmEvent(stepId, nextAlarm ?: 0)
 
-    fun registered(place: Place) = token(place).isNotEmpty()
+    // On boot a ringing service needs a new exact delivery, including after escalation.
+    fun restoreAt(now: Long): Long? = if (phase.ringing) minOf(nextAlarm ?: Long.MAX_VALUE, now + 1000) else nextAlarm
+
     private fun token(place: Place) = if (place == Place.BATHROOM) bathroom else kitchen
+    fun registered(place: Place) = token(place).isNotEmpty()
 
     fun register(place: Place, raw: String): WakeState {
         if (phase.active) throw InputError("実行中はQRコードを変更できません。")
@@ -49,50 +80,49 @@ data class WakeState(
         return if (place == Place.BATHROOM) copy(bathroom = value) else copy(kitchen = value)
     }
 
+    fun setTiming(value: Timing): WakeState {
+        if (enabled || phase.active) throw InputError("予約をオフにしてから切り替えてください。")
+        if (value == Timing.SHORT && !BuildConfig.DEBUG) throw InputError("短時間モードはデバッグ版専用です。")
+        return copy(timing = value)
+    }
+
     fun schedule(at: Long, on: Boolean, now: Long): WakeState {
         if (phase.active) throw InputError("起床確認が進行中です。")
         if (on && at <= now) throw InputError("現在より後の日時を選んでください。")
         if (on && Place.entries.any { !registered(it) }) throw InputError("先に2地点のQRコードを登録してください。")
-        return copy(date = at, enabled = on, phase = if (on) Phase.IDLE else phase)
+        return copy(date = at, enabled = on, phase = if (on) Phase.IDLE else phase, generation = generation + 1)
     }
 
-    fun fire(now: Long): WakeState {
-        val due = nextAlarm ?: return this
-        if (now < due) return this
+    fun fire(delivered: AlarmEvent, now: Long): WakeState {
+        if (delivered != event || now < (nextAlarm ?: return this)) return this
         return when (phase) {
-            Phase.AWAITING_RECHECK -> copy(phase = Phase.CHECKING, deadline = now + RESPONSE_MS)
-            Phase.CHECKING -> ringAgain()
-            else -> copy(phase = Phase.ALARM_RINGING, enabled = false, started = now, qrDone = 0, finished = 0, deadline = 0)
+            Phase.IDLE -> copy(phase = Phase.INITIAL_ALARM, enabled = false, started = now, qrDone = 0,
+                firstDone = 0, finished = 0, deadline = now + timing.escalation, escalated = false)
+            Phase.WAITING_FIRST_CHALLENGE -> copy(phase = Phase.FIRST_CHALLENGE_ACTIVE, deadline = now + timing.escalation)
+            Phase.WAITING_FINAL_CHALLENGE -> copy(phase = Phase.FINAL_CHALLENGE_ACTIVE, deadline = now + timing.escalation)
+            else -> copy(escalated = true, deadline = 0)
         }
     }
 
-    fun beginScan() = if (phase == Phase.ALARM_RINGING) copy(phase = Phase.AWAITING_BATHROOM_QR) else this
+    fun beginScan() = if (phase == Phase.INITIAL_ALARM) copy(phase = Phase.AWAITING_BATHROOM_QR) else this
 
-    fun verify(place: Place, raw: String, now: Long): WakeState {
-        val expected = when (phase) {
-            Phase.AWAITING_BATHROOM_QR -> Place.BATHROOM
-            Phase.AWAITING_KITCHEN_QR -> Place.KITCHEN
+    fun verify(step: StepId, raw: String, now: Long): WakeState {
+        val expected = phase.place
+        if (step != stepId || expected == null || phase == Phase.INITIAL_ALARM)
+            throw InputError("認証の段階が変わりました。現在の地点を確認してください。")
+        val value = readToken(raw, expected)
+        if (!registered(expected) || value != token(expected)) throw InputError("登録済みのQRコードと一致しません。")
+        return when (phase) {
+            Phase.AWAITING_BATHROOM_QR -> copy(phase = Phase.AWAITING_KITCHEN_QR)
+            Phase.AWAITING_KITCHEN_QR -> copy(phase = Phase.WAITING_FIRST_CHALLENGE, qrDone = now,
+                escalated = false, deadline = now + timing.first)
+            Phase.FIRST_CHALLENGE_ACTIVE -> copy(phase = Phase.WAITING_FINAL_CHALLENGE, firstDone = now,
+                escalated = false, deadline = now + timing.final)
+            Phase.FINAL_CHALLENGE_ACTIVE -> copy(phase = Phase.COMPLETED, finished = now, escalated = false, deadline = 0)
             else -> throw InputError("現在はQR認証の段階ではありません。")
         }
-        if (place != expected) throw InputError("次は${expected.title}を認証してください。")
-        val value = readToken(raw, expected)
-        if (!registered(expected)) throw InputError("${expected.title}のQRコードが未登録です。")
-        if (value != token(expected)) throw InputError("登録済みのQRコードと一致しません。")
-        return if (place == Place.BATHROOM) copy(phase = Phase.AWAITING_KITCHEN_QR)
-        else copy(phase = Phase.AWAITING_RECHECK, qrDone = now, deadline = now + RECHECK_MS)
     }
 
-    fun answer(awake: Boolean, now: Long): WakeState {
-        if (phase != Phase.CHECKING) return this
-        return if (awake && now < deadline) copy(phase = Phase.COMPLETED, finished = now, deadline = 0)
-        else ringAgain()
-    }
-
-    private fun ringAgain() = copy(phase = Phase.ALARM_RINGING, qrDone = 0, deadline = 0)
-    fun abort(now: Long) = if (phase.active) copy(phase = Phase.ABORTED, enabled = false, deadline = 0, lastAbort = now) else this
-
-    companion object {
-        const val RECHECK_MS = 10 * 60_000L
-        const val RESPONSE_MS = 60_000L
-    }
+    fun abort(now: Long) = if (phase.active) copy(phase = Phase.EMERGENCY_STOPPED, enabled = false,
+        deadline = 0, escalated = false, lastAbort = now) else this
 }

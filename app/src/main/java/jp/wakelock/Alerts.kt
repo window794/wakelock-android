@@ -41,11 +41,13 @@ class Alerts(private val context: Context) {
         return builder.build()
     }
 
-    fun ring() = notice(RING, "起床時刻です", "タップしてQR認証へ", true)
-    fun check() = notice(CHECK, "起きていますか？", "60秒以内にタップして回答してください", false)
-    fun ringFallback(checking: Boolean) = post(3, if (checking)
-        notice(BACKUP, "起きていますか？", "60秒以内にタップして回答してください", false)
-    else notice(BACKUP, "アラームを確認してください", "タップしてWakeLockを開いてください", true))
+    fun alarm(phase: Phase?, escalated: Boolean) = notice(
+        if ((phase?.step ?: 0) >= 3) CHECK else RING,
+        phase?.prompt ?: "起床プロトコルを復元中",
+        if (escalated) "認証待ちです。タップしてQRを読み取ってください" else "タップして起床確認を開く",
+        phase?.ringing == true
+    )
+    fun ringFallback(phase: Phase) = post(3, notice(BACKUP, phase.prompt, "タップしてWakeLockを開いてください", true))
     private fun post(id: Int, notification: Notification) {
         if (Build.VERSION.SDK_INT < 33 || context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED)
             manager.notify(id, notification)

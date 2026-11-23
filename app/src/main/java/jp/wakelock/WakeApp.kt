@@ -13,6 +13,11 @@ class WakeApp : Application() {
     val controller by lazy { WakeController(this) }
 }
 
+private const val TICK = "jp.wakelock.PROTOCOL_V2"
+private const val RUN = "run"
+private const val PHASE = "phase"
+private const val DEADLINE = "deadline"
+
 class WakeController(private val app: Context) {
     private val store = WakeStore(app)
     val states = store.states
@@ -21,20 +26,27 @@ class WakeController(private val app: Context) {
     private val lock = Mutex()
     val exact get() = Build.VERSION.SDK_INT < 31 || manager.canScheduleExactAlarms()
 
-    private val delivery: PendingIntent get() = PendingIntent.getBroadcast(
-        app, 0, Intent(app, AlarmReceiver::class.java), PendingIntent.FLAG_IMMUTABLE
-    )
+    private fun cancel(code: Int, intent: Intent) {
+        PendingIntent.getBroadcast(app, code, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_NO_CREATE)?.let {
+            manager.cancel(it)
+            it.cancel()
+        }
+    }
 
-    private fun setClock(time: Long?) {
-        if (time == null || !exact) {
-            manager.cancel(delivery)
+    private fun setClock(state: WakeState, at: Long?) {
+        val intent = Intent(app, AlarmReceiver::class.java).setAction(TICK)
+        if (at == null || !exact) {
+            cancel(2, intent)
             return
         }
+        val event = state.event
+        intent.putExtra(RUN, event.step.generation).putExtra(PHASE, event.step.phase.name).putExtra(DEADLINE, event.deadline)
+        val delivery = PendingIntent.getBroadcast(app, 2, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         try {
-            manager.setAlarmClock(AlarmManager.AlarmClockInfo(time, alerts.openApp), delivery)
-        } catch (_: SecurityException) {
-            if (exact) throw InputError("予約に失敗しました。アラームの権限を確認してください。")
-            // Revocation races with canScheduleExactAlarms. The saved date survives the grant.
+            manager.setAlarmClock(AlarmManager.AlarmClockInfo(at, alerts.openApp), delivery)
+        } catch (e: SecurityException) {
+            if (exact) throw e
+            // If special access was revoked between check and set, the saved deadline is retried on grant.
         }
     }
 
@@ -42,35 +54,35 @@ class WakeController(private val app: Context) {
         applyState(store.change(transform))
     }
 
-    suspend fun deliver() = lock.withLock {
-        applyState(store.change { it.fire(System.currentTimeMillis()) })
+    suspend fun deliver(event: AlarmEvent) = lock.withLock {
+        if (states.first().event != event) return@withLock
+        applyState(store.change { it.fire(event, System.currentTimeMillis()) })
     }
 
     suspend fun restore(fromBroadcast: Boolean) = lock.withLock {
-        val current = states.first()
-        if (fromBroadcast && current.phase.playsAlarm) {
-            // Android 15+ prohibits starting a mediaPlayback FGS from BOOT_COMPLETED.
-            val resumeAt = System.currentTimeMillis() + 1000
-            if (exact) setClock(minOf(current.nextAlarm ?: resumeAt, resumeAt))
-            else alerts.ringFallback(current.phase == Phase.CHECKING)
-        } else if (fromBroadcast) {
-            setClock(current.nextAlarm)
+        cancel(0, Intent(app, AlarmReceiver::class.java)) // v1 PendingIntent had no action.
+        val now = System.currentTimeMillis()
+        val state = store.change { if (fromBroadcast) it else it.fire(it.event, now) }
+        if (fromBroadcast && state.phase.ringing) {
+            // A boot broadcast cannot start a mediaPlayback FGS directly.
+            setClock(state, state.restoreAt(now))
+            if (!exact) alerts.ringFallback(state.phase)
         } else {
-            applyState(store.change { it.fire(System.currentTimeMillis()) })
+            applyState(state)
         }
     }
 
     private fun applyState(state: WakeState) {
-        setClock(state.nextAlarm)
-        if (state.phase.playsAlarm) {
-            val checking = state.phase == Phase.CHECKING
-            val intent = Intent(app, RingService::class.java).putExtra(RingService.CHECKING, checking)
+        setClock(state, state.nextAlarm)
+        if (state.phase.ringing) {
+            val intent = Intent(app, RingService::class.java).putExtra(PHASE, state.phase.name)
+                .putExtra("escalated", state.escalated)
             try {
                 app.startForegroundService(intent)
             } catch (_: IllegalStateException) {
-                alerts.ringFallback(checking)
+                alerts.ringFallback(state.phase)
             } catch (_: SecurityException) {
-                alerts.ringFallback(checking)
+                alerts.ringFallback(state.phase)
             }
         } else {
             app.stopService(Intent(app, RingService::class.java))
@@ -80,7 +92,7 @@ class WakeController(private val app: Context) {
 }
 
 abstract class WakeReceiver : BroadcastReceiver() {
-    abstract suspend fun receive(controller: WakeController)
+    abstract suspend fun receive(controller: WakeController, intent: Intent)
 
     override fun onReceive(context: Context, intent: Intent) {
         val pending = goAsync()
@@ -89,7 +101,7 @@ abstract class WakeReceiver : BroadcastReceiver() {
         wake.acquire(10_000)
         CoroutineScope(Dispatchers.Main.immediate).launch {
             try {
-                receive((context.applicationContext as WakeApp).controller)
+                receive((context.applicationContext as WakeApp).controller, intent)
             } finally {
                 if (wake.isHeld) wake.release()
                 pending.finish()
@@ -99,8 +111,12 @@ abstract class WakeReceiver : BroadcastReceiver() {
 }
 
 class AlarmReceiver : WakeReceiver() {
-    override suspend fun receive(controller: WakeController) = controller.deliver()
+    override suspend fun receive(controller: WakeController, intent: Intent) {
+        if (intent.action != TICK || !intent.hasExtra(RUN) || !intent.hasExtra(DEADLINE)) return
+        val phase = Phase.entries.find { it.name == intent.getStringExtra(PHASE) } ?: return
+        controller.deliver(AlarmEvent(StepId(intent.getLongExtra(RUN, -1), phase), intent.getLongExtra(DEADLINE, -1)))
+    }
 }
 class RestoreReceiver : WakeReceiver() {
-    override suspend fun receive(controller: WakeController) = controller.restore(fromBroadcast = true)
+    override suspend fun receive(controller: WakeController, intent: Intent) = controller.restore(fromBroadcast = true)
 }
