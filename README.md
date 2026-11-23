@@ -2,6 +2,8 @@
 
 Android 8.0（API 26）以降向けの単発目覚ましです。洗面所、キッチンの順に登録済みQRを読むと音が止まり、その10分後に「起きていますか？」と通知します。「起きています」を60秒以内に選ぶと、その朝の起床確認が完了します。
 
+window794が「自分にはこれが便利だ」と思って作りましたが、あなたの布団に勝てるかは未検証です。
+
 アラームを止めた後の二度寝を減らすために、寝床からの移動と、その後も起きていることの両方を確認する個人開発のアプリです。Kotlin、Jetpack Compose / Material 3、AlarmManager、CameraX、ML Kit、Preferences DataStoreを使用しています。
 
 WakeLock is a personal Android project developed with the assistance of OpenAI Codex. Requirements, design decisions, and testing are reviewed by the project owner.
