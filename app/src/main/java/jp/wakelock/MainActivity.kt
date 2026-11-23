@@ -171,6 +171,11 @@ class MainActivity : ComponentActivity() {
                         })
                         TextButton(onClick = { back() }) { Text("ホームに戻る") }
                     }
+                    page == "sound" -> {
+                        val sound by vm.sound.collectAsStateWithLifecycle()
+                        sound?.let { SoundSettings(it, vm::selectSound) }
+                        TextButton(onClick = { back() }) { Text("ホームに戻る") }
+                    }
                     register -> {
                         Heading("QRコード登録")
                         Place.entries.forEach { p ->
@@ -196,6 +201,7 @@ class MainActivity : ComponentActivity() {
                             })
                         }
                         BigButton("アラームの日時を設定") { vm.message.value = null; page = "settings" }
+                        BigButton("アラーム音・音量の設定") { vm.message.value = null; page = "sound" }
                         BigButton("QRコード登録") { vm.message.value = null; page = "qr" }
                         if (BuildConfig.DEBUG) {
                             Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,

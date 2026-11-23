@@ -11,6 +11,7 @@ import kotlinx.coroutines.sync.withLock
 
 class WakeApp : Application() {
     val controller by lazy { WakeController(this) }
+    internal val soundStore by lazy { AlarmSoundStore(this) }
 }
 
 private const val TICK = "jp.wakelock.PROTOCOL_V2"

@@ -12,9 +12,9 @@ class RingService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val vibrator by lazy { getSystemService(Vibrator::class.java) }
     private val audioManager by lazy { getSystemService(AudioManager::class.java) }
-    private val attributes = AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ALARM)
-        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build()
-    private var player: MediaPlayer? = null
+    private val attributes = alarmAttributes
+    private val player by lazy { alarmPlayer(this, scope) }
+    private var selectedUri: String? = null
     private var vibrationEscalated: Boolean? = null
     private var phase: Phase? = null
     private var latestStart = 0
@@ -44,6 +44,11 @@ class RingService : Service() {
         }
         scope.launch {
             val state = controller.states.first()
+            val sound = try {
+                (application as WakeApp).soundStore.sounds.first()
+            } catch (_: java.io.IOException) {
+                AlarmSound()
+            }
             if (startId != latestStart) return@launch
             if (!state.phase.ringing || ((hint != state.phase || strong != state.escalated) &&
                     !foreground(state.phase, state.escalated))) {
@@ -51,6 +56,7 @@ class RingService : Service() {
                 return@launch
             }
             phase = state.phase
+            selectedUri = sound.uri
             vibrate(state.escalated)
             if (!focusRequested) {
                 focusRequested = true
@@ -88,41 +94,16 @@ class RingService : Service() {
     }
 
     private fun startAudio() {
-        if (player != null || phase == null) return
-        val audio = MediaPlayer()
-        player = audio
-        try {
-            audio.setAudioAttributes(attributes)
-            audio.setWakeMode(this, PowerManager.PARTIAL_WAKE_LOCK)
-            val uri = RingtoneManager.getActualDefaultRingtoneUri(this, RingtoneManager.TYPE_ALARM)
-            if (uri == null || runCatching { audio.setDataSource(this, uri) }.isFailure) {
-                resources.openRawResourceFd(R.raw.alarm).use {
-                    audio.setDataSource(it.fileDescriptor, it.startOffset, it.length)
-                }
-            }
-            audio.isLooping = true
-            audio.setOnPreparedListener { if (player === it) it.start() }
-            audio.setOnErrorListener { failed, _, _ ->
-                if (player === failed) playbackFailed()
-                true
-            }
-            audio.prepareAsync()
-            controller.alerts.clearBackup()
-        } catch (_: Exception) {
-            playbackFailed()
+        if (phase == null) return
+        controller.alerts.clearBackup()
+        player.start(selectedUri) {
+            abandonFocus()
+            phase?.let(controller.alerts::ringFallback)
         }
     }
 
-    private fun playbackFailed() {
-        stopAudio()
-        abandonFocus()
-        phase?.let(controller.alerts::ringFallback)
-    }
-
     private fun stopAudio() {
-        val previous = player
-        player = null
-        previous?.release()
+        player.stop()
     }
 
     private fun abandonFocus() {

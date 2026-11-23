@@ -5,7 +5,7 @@ import androidx.datastore.preferences.core.*
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.map
 
-private val Context.wakeData by preferencesDataStore("wake")
+internal val Context.wakeData by preferencesDataStore("wake")
 
 internal object WakeRecord {
     private val date = longPreferencesKey("date")
