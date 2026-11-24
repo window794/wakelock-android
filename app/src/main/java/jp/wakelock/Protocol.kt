@@ -6,6 +6,7 @@ enum class Place(val wire: String, val title: String) {
 
 enum class Phase(val label: String, val step: Int = 0, val place: Place? = null) {
     IDLE("待機中"),
+    SNOOZED("スヌーズ中", 1),
     INITIAL_ALARM("初回アラーム", 1, Place.BATHROOM),
     AWAITING_BATHROOM_QR("初回認証", 1, Place.BATHROOM),
     AWAITING_KITCHEN_QR("初回認証", 2, Place.KITCHEN),
@@ -19,7 +20,7 @@ enum class Phase(val label: String, val step: Int = 0, val place: Place? = null)
 
     val waiting get() = this == WAITING_FIRST_CHALLENGE || this == WAITING_FINAL_CHALLENGE
     val ringing get() = place != null
-    val active get() = waiting || ringing
+    val active get() = waiting || ringing || this == SNOOZED
     val prompt get() = when (this) {
         FIRST_CHALLENGE_ACTIVE -> "起床確認：キッチンに移動してください"
         FINAL_CHALLENGE_ACTIVE -> "最終確認：洗面所に移動してください"
@@ -42,7 +43,7 @@ enum class Timing(val first: Long, val final: Long, val escalation: Long) {
 
 // An OS delivery or a camera result belongs to a particular run and step.
 data class StepId(val generation: Long, val phase: Phase)
-data class AlarmEvent(val step: StepId, val deadline: Long)
+data class AlarmEvent(val step: StepId, val deadline: Long, val alarmId: String? = null)
 
 data class WakeState(
     val date: Long = 0,
@@ -58,7 +59,10 @@ data class WakeState(
     val lastAbort: Long = 0,
     val generation: Long = 0,
     val escalated: Boolean = false,
-    val timing: Timing = Timing.NORMAL
+    val timing: Timing = Timing.NORMAL,
+    val alarms: List<ClockAlarm> = emptyList(),
+    val ownerId: String? = null,
+    val snoozeUsed: Boolean = false
 ) {
     val stepId get() = StepId(generation, phase)
     val nextAlarm: Long? get() = when {
@@ -84,7 +88,7 @@ data class WakeState(
     }
 
     fun setTiming(value: Timing): WakeState {
-        if (enabled || phase.active) throw InputError("予約をオフにしてから切り替えてください。")
+        if (enabled || alarms.any { it.enabled } || phase.active) throw InputError("予約をオフにしてから切り替えてください。")
         if (value == Timing.SHORT && !BuildConfig.DEBUG) throw InputError("短時間モードはデバッグ版専用です。")
         return copy(timing = value)
     }
@@ -101,6 +105,7 @@ data class WakeState(
         return when (phase) {
             Phase.IDLE -> copy(phase = Phase.INITIAL_ALARM, enabled = false, started = now, qrDone = 0,
                 firstDone = 0, finished = 0, deadline = now + timing.escalation, escalated = false)
+            Phase.SNOOZED -> copy(phase = Phase.INITIAL_ALARM, deadline = now + timing.escalation)
             Phase.WAITING_FIRST_CHALLENGE -> copy(phase = Phase.FIRST_CHALLENGE_ACTIVE, deadline = now + timing.escalation)
             Phase.WAITING_FINAL_CHALLENGE -> copy(phase = Phase.FINAL_CHALLENGE_ACTIVE, deadline = now + timing.escalation)
             else -> copy(escalated = true, deadline = 0)

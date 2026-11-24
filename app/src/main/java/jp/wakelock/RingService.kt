@@ -38,26 +38,35 @@ class RingService : Service() {
         latestStart = startId
         val hint = Phase.entries.find { it.name == intent?.getStringExtra("phase") }
         val strong = intent?.getBooleanExtra("escalated", false) == true
-        if (!foreground(hint, strong)) {
+        val buzz = intent?.getBooleanExtra("vibrate", true) != false
+        if (!foreground(hint, strong, buzz)) {
             stopSelf(startId)
             return START_NOT_STICKY
         }
         scope.launch {
             val state = controller.states.first()
-            val sound = try {
+            val sound = state.owner?.sound ?: try {
                 (application as WakeApp).soundStore.sounds.first()
             } catch (_: java.io.IOException) {
                 AlarmSound()
             }
             if (startId != latestStart) return@launch
-            if (!state.phase.ringing || ((hint != state.phase || strong != state.escalated) &&
-                    !foreground(state.phase, state.escalated))) {
+            if (!state.phase.ringing || ((hint != state.phase || strong != state.escalated || buzz != (state.owner?.vibrate != false)) &&
+                    !foreground(state.phase, state.escalated, state.owner?.vibrate != false))) {
                 stopSelf(startId)
                 return@launch
             }
             phase = state.phase
+            if (selectedUri != sound.uri && focusRequested) {
+                stopAudio()
+                abandonFocus()
+            }
             selectedUri = sound.uri
-            vibrate(state.escalated)
+            if (state.owner?.vibrate != false) vibrate(state.escalated)
+            else {
+                vibrator.cancel()
+                vibrationEscalated = null
+            }
             if (!focusRequested) {
                 focusRequested = true
                 when (audioManager.requestAudioFocus(focusRequest)) {
@@ -70,10 +79,10 @@ class RingService : Service() {
         return START_STICKY
     }
 
-    private fun foreground(value: Phase?, escalated: Boolean): Boolean {
+    private fun foreground(value: Phase?, escalated: Boolean, vibrate: Boolean): Boolean {
         try {
             val id = if ((value?.step ?: 0) >= 3) Alerts.CHECK_ID else Alerts.RING_ID
-            startForeground(id, controller.alerts.alarm(value, escalated))
+            startForeground(id, controller.alerts.alarm(value, escalated, vibrate))
             return true
         } catch (_: IllegalStateException) {
             value?.let(controller.alerts::ringFallback)

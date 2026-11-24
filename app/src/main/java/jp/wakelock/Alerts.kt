@@ -41,8 +41,8 @@ class Alerts(private val context: Context) {
         return builder.build()
     }
 
-    fun alarm(phase: Phase?, escalated: Boolean) = notice(
-        if ((phase?.step ?: 0) >= 3) CHECK else RING,
+    fun alarm(phase: Phase?, escalated: Boolean, vibrate: Boolean) = notice(
+        if (vibrate && (phase?.step ?: 0) >= 3) CHECK else RING,
         phase?.prompt ?: "起床プロトコルを復元中",
         if (escalated) "認証待ちです。タップしてQRを読み取ってください" else "タップして起床確認を開く",
         phase?.ringing == true

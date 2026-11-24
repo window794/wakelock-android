@@ -15,10 +15,10 @@ class WakeViewModel(app: Application) : AndroidViewModel(app) {
     private val soundStore = (app as WakeApp).soundStore
     internal val sound = soundStore.sounds.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
-    internal fun selectSound(uri: Uri?, document: Boolean) {
+    internal fun selectSound(uri: Uri?, document: Boolean, alarmId: String? = null) {
         viewModelScope.launch {
             try {
-                soundStore.select(uri, document)
+                soundStore.select(uri, document, alarmId)
                 message.value = null
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
@@ -28,10 +28,13 @@ class WakeViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun edit(onSaved: () -> Unit = {}, transform: (WakeState) -> WakeState) {
+    fun edit(onSaved: () -> Unit = {}, transform: (WakeState) -> WakeState) =
+        update(onSaved) { controller.change(transform) }
+
+    private fun update(onSaved: () -> Unit, action: suspend () -> Unit) {
         viewModelScope.launch {
             try {
-                controller.change(transform)
+                action()
                 message.value = null
                 onSaved()
             } catch (e: InputError) {
@@ -41,6 +44,19 @@ class WakeViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
     }
+    internal fun addAlarm(minute: Int, onSaved: (String) -> Unit) {
+        val id = java.util.UUID.randomUUID().toString()
+        update({ onSaved(id) }) { controller.addAlarm(id, minute) }
+    }
+
+    internal fun removeAlarm(id: String) {
+        edit(onSaved = {
+            viewModelScope.launch {
+                try { soundStore.afterDeletion() } catch (_: IOException) { /* Retried on the next selection. */ }
+            }
+        }) { it.deleteCard(id) }
+    }
+
     fun refresh() {
         viewModelScope.launch { controller.restore(fromBroadcast = false) }
     }

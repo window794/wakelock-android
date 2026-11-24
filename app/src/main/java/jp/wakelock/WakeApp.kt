@@ -4,6 +4,7 @@ import android.app.*
 import android.content.*
 import android.os.Build
 import android.os.PowerManager
+import java.time.ZoneId
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
@@ -40,7 +41,8 @@ class WakeController(private val app: Context) {
             cancel(2, intent)
             return
         }
-        val event = state.event
+        val event = requireNotNull(state.clockEvent)
+        intent.putExtra("alarmId", event.alarmId)
         intent.putExtra(RUN, event.step.generation).putExtra(PHASE, event.step.phase.name).putExtra(DEADLINE, event.deadline)
         val delivery = PendingIntent.getBroadcast(app, 2, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         try {
@@ -52,7 +54,15 @@ class WakeController(private val app: Context) {
     }
 
     suspend fun change(transform: (WakeState) -> WakeState) = lock.withLock {
-        applyState(store.change(transform))
+        applyState(store.change { transform(it).finishOwner(System.currentTimeMillis(), ZoneId.systemDefault()) })
+    }
+
+    internal suspend fun addAlarm(id: String, minute: Int) = lock.withLock {
+        applyState(store.edit { current, prefs ->
+            val card = ClockAlarm(id = id, minute = minute, sound = SoundRecord.read(prefs),
+                enabled = Place.entries.all(current::registered))
+            current.saveCard(card, System.currentTimeMillis(), ZoneId.systemDefault())
+        })
     }
 
     // Registration shares the protocol lock but does not need to reschedule the alarm.
@@ -61,14 +71,18 @@ class WakeController(private val app: Context) {
     }
 
     suspend fun deliver(event: AlarmEvent) = lock.withLock {
-        if (states.first().event != event) return@withLock
-        applyState(store.change { it.fire(event, System.currentTimeMillis()) })
+        if (states.first().clockEvent != event) return@withLock
+        applyState(store.change { it.deliverClock(event, System.currentTimeMillis()) })
     }
 
-    suspend fun restore(fromBroadcast: Boolean) = lock.withLock {
+    suspend fun restore(fromBroadcast: Boolean, clockChanged: Boolean = false) = lock.withLock {
         cancel(0, Intent(app, AlarmReceiver::class.java)) // v1 PendingIntent had no action.
         val now = System.currentTimeMillis()
-        val state = store.change { if (fromBroadcast) it else it.fire(it.event, now) }
+        val state = store.change {
+            val current = it.recalculate(now, ZoneId.systemDefault(), clockChanged)
+            val event = current.clockEvent
+            if (fromBroadcast || event == null) current else current.deliverClock(event, now)
+        }
         if (fromBroadcast && state.phase.ringing) {
             // A boot broadcast cannot start a mediaPlayback FGS directly.
             setClock(state, state.restoreAt(now))
@@ -79,10 +93,10 @@ class WakeController(private val app: Context) {
     }
 
     private fun applyState(state: WakeState) {
-        setClock(state, state.nextAlarm)
+        setClock(state, if (state.phase.active) state.nextAlarm else state.clockEvent?.deadline)
         if (state.phase.ringing) {
             val intent = Intent(app, RingService::class.java).putExtra(PHASE, state.phase.name)
-                .putExtra("escalated", state.escalated)
+                .putExtra("escalated", state.escalated).putExtra("vibrate", state.owner?.vibrate != false)
             try {
                 app.startForegroundService(intent)
             } catch (_: IllegalStateException) {
@@ -120,9 +134,10 @@ class AlarmReceiver : WakeReceiver() {
     override suspend fun receive(controller: WakeController, intent: Intent) {
         if (intent.action != TICK || !intent.hasExtra(RUN) || !intent.hasExtra(DEADLINE)) return
         val phase = Phase.entries.find { it.name == intent.getStringExtra(PHASE) } ?: return
-        controller.deliver(AlarmEvent(StepId(intent.getLongExtra(RUN, -1), phase), intent.getLongExtra(DEADLINE, -1)))
+        controller.deliver(AlarmEvent(StepId(intent.getLongExtra(RUN, -1), phase), intent.getLongExtra(DEADLINE, -1), intent.getStringExtra("alarmId")))
     }
 }
 class RestoreReceiver : WakeReceiver() {
-    override suspend fun receive(controller: WakeController, intent: Intent) = controller.restore(fromBroadcast = true)
+    override suspend fun receive(controller: WakeController, intent: Intent) = controller.restore(
+        fromBroadcast = true, clockChanged = intent.action == Intent.ACTION_TIME_CHANGED || intent.action == Intent.ACTION_TIMEZONE_CHANGED)
 }

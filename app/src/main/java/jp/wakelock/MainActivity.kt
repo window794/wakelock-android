@@ -17,6 +17,8 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.semantics.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
@@ -79,8 +81,11 @@ class MainActivity : ComponentActivity() {
         val active = phase.active
         val controller = vm.controller
         var page by rememberSaveable { mutableStateOf("home") }
+        var soundTarget by rememberSaveable { mutableStateOf<String?>(null) }
+        var expanded by rememberSaveable { mutableStateOf<String?>(null) }
+        var adding by rememberSaveable { mutableStateOf(false) }
         var scanning by rememberSaveable { mutableStateOf<String?>(null) }
-        var abortDialog by rememberSaveable { mutableStateOf(false) }
+        var abortDialog by rememberSaveable(state.generation) { mutableStateOf(false) }
         var seenCompletion by rememberSaveable { mutableLongStateOf(0L) }
         val complete = phase == Phase.COMPLETED && state.finished != seenCompletion
         val register = !active && page == "qr"
@@ -88,7 +93,7 @@ class MainActivity : ComponentActivity() {
         val scanRoute = "auth/${scanStep.generation}/${scanStep.phase.name}"
         val validPlace = if (register) Place.entries.find { scanning == "reg" + it.name }
             else phase.place?.takeIf { scanning == scanRoute }
-        LaunchedEffect(active) { if (active) page = "home" }
+        LaunchedEffect(active) { if (active) { page = "home"; adding = false } }
         LaunchedEffect(scanning, validPlace) { if (validPlace == null) scanning = null }
         LaunchedEffect(phase) {
             lockScreen(phase.ringing)
@@ -112,137 +117,166 @@ class MainActivity : ComponentActivity() {
         }
         BackHandler(scanning != null || complete || (!active && page != "home")) { back() }
 
-        key(phase, page, validPlace) {
-            Column(Modifier.fillMaxSize().safeDrawingPadding().verticalScroll(rememberScrollState()).padding(24.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                if (message != null) Text(message.orEmpty(), color = MaterialTheme.colorScheme.error)
-                if (BuildConfig.DEBUG && state.timing == Timing.SHORT)
-                    Text("デバッグ短時間モード", color = MaterialTheme.colorScheme.tertiary)
-                when {
-                    validPlace != null -> {
-                        Heading(if (register) "${validPlace.title}を登録" else "${validPlace.title}を認証")
-                        if (cameraGranted) {
-                            QrScanner(this@MainActivity, validPlace) { raw ->
-                                scanning = null
-                                vm.edit { if (register) it.register(validPlace, raw) else it.verify(scanStep, raw, System.currentTimeMillis()) }
+        val showList = !active && !complete && page == "home"
+        Box(Modifier.fillMaxSize()) {
+            key(phase, page, validPlace) {
+                Column(Modifier.fillMaxSize().safeDrawingPadding().verticalScroll(rememberScrollState()).padding(24.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    if (message != null) Text(message.orEmpty(), color = MaterialTheme.colorScheme.error)
+                    if (BuildConfig.DEBUG && state.timing == Timing.SHORT)
+                        Text("デバッグ短時間モード", color = MaterialTheme.colorScheme.tertiary)
+                    when {
+                        validPlace != null -> {
+                            Heading(if (register) "${validPlace.title}を登録" else "${validPlace.title}を認証")
+                            if (cameraGranted) {
+                                QrScanner(this@MainActivity, validPlace) { raw ->
+                                    scanning = null
+                                    vm.edit { if (register) it.register(validPlace, raw) else it.verify(scanStep, raw, System.currentTimeMillis()) }
+                                }
+                            } else {
+                                Text("QRコードの読み取りにはカメラの許可が必要です。")
+                                BigButton("カメラを許可") { camera.launch(Manifest.permission.CAMERA) }
+                                TextButton(onClick = { openSettings(Settings.ACTION_APPLICATION_DETAILS_SETTINGS) }) { Text("アプリの権限設定を開く") }
                             }
-                        } else {
-                            Text("QRコードの読み取りにはカメラの許可が必要です。")
-                            BigButton("カメラを許可") { camera.launch(Manifest.permission.CAMERA) }
-                            TextButton(onClick = { openSettings(Settings.ACTION_APPLICATION_DETAILS_SETTINGS) }) { Text("アプリの権限設定を開く") }
+                            OutlinedButton(onClick = { back() }) { Text("読み取りを閉じる") }
                         }
-                        OutlinedButton(onClick = { back() }) { Text("読み取りを閉じる") }
-                    }
-                    phase.ringing -> {
-                        var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
-                        LaunchedEffect(Unit) { while (true) { now = System.currentTimeMillis(); delay(1000) } }
-                        Text("STEP ${phase.step} / 4　${phase.label}", style = MaterialTheme.typography.titleLarge)
-                        Text(localTime(now).format(DateTimeFormatter.ofPattern("HH:mm")), style = MaterialTheme.typography.displayLarge)
-                        Heading(phase.prompt)
-                        LinearProgressIndicator(progress = { (phase.step - 1) / 4f }, modifier = Modifier.fillMaxWidth())
-                        if (state.escalated) Text("認証を待っています", color = MaterialTheme.colorScheme.error)
-                        BigButton("${phase.place?.title}のQRコードを読む") {
-                            vm.edit(onSaved = { scanning = scanRoute }) { it.beginScan() }
-                        }
-                    }
-                    phase.waiting -> {
-                        val now by produceState(System.currentTimeMillis(), state.deadline) {
-                            while (true) { value = System.currentTimeMillis(); delay(500) }
-                        }
-                        val target = if (phase == Phase.WAITING_FIRST_CHALLENGE) Place.KITCHEN else Place.BATHROOM
-                        Heading(phase.label)
-                        Text("次の確認まで " + durationText((state.deadline - now + 999).coerceAtLeast(0)),
-                            style = MaterialTheme.typography.headlineMedium)
-                        LinearProgressIndicator(progress = { phase.step / 4f }, modifier = Modifier.fillMaxWidth())
-                        Text(if (controller.exact) "次は${target.title}のQR認証です。画面を閉じても起床確認は続きます。"
-                            else "予約は保留中です。下の設定から正確なアラームを許可してください。")
-                    }
-                    complete -> {
-                        Heading("起床プロトコル完了")
-                        Text("アラーム開始　${stamp(state.started)}")
-                        Text("初回2地点認証　${stamp(state.qrDone)}")
-                        Text("起床確認・キッチン　${stamp(state.firstDone)}")
-                        Text("最終確認・洗面所　${stamp(state.finished)}")
-                        Text("全体の所要時間　" + if (state.finished >= state.started) durationText(state.finished - state.started) else "端末時刻変更のため不明")
-                        BigButton("ホームへ") { back() }
-                    }
-                    page == "settings" -> {
-                        AlarmSettings(this@MainActivity, state, save = { at ->
-                            vm.edit(onSaved = { page = "home" }) { it.schedule(at, true, System.currentTimeMillis()) }
-                        })
-                        TextButton(onClick = { back() }) { Text("ホームに戻る") }
-                    }
-                    page == "sound" -> {
-                        val sound by vm.sound.collectAsStateWithLifecycle()
-                        sound?.let { SoundSettings(it, vm::selectSound) }
-                        TextButton(onClick = { back() }) { Text("ホームに戻る") }
-                    }
-                    register -> {
-                        QrManagement(this@MainActivity, state, qrViewModel, scan = { p ->
-                            vm.message.value = null
-                            scanning = "reg" + p.name
-                        }, home = { back() })
-                    }
-                    else -> {
-                        Heading("WakeLock")
-                        Text("起床プロトコル　${phase.label}")
-                        Text("次のアラーム", style = MaterialTheme.typography.titleMedium)
-                        Text(if (state.enabled) stamp(state.date) else "予約なし", style = MaterialTheme.typography.headlineMedium)
-                        if (state.enabled && !controller.exact) Text("予約は権限の許可待ちです。", color = MaterialTheme.colorScheme.error)
-                        Row(horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                            Text("アラーム " + if (state.enabled) "オン" else "オフ")
-                            Switch(state.enabled, { on ->
-                                if (on && state.date <= System.currentTimeMillis()) page = "settings"
-                                else vm.edit { it.schedule(it.date, on, System.currentTimeMillis()) }
-                            })
-                        }
-                        BigButton("アラームの日時を設定") { vm.message.value = null; page = "settings" }
-                        BigButton("アラーム音・音量の設定") { vm.message.value = null; page = "sound" }
-                        BigButton("QRコード管理") { vm.message.value = null; qrViewModel.notice = ""; page = "qr" }
-                        if (BuildConfig.DEBUG) {
-                            Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                                Text("短時間テスト（30秒・20秒）")
-                                Switch(state.timing == Timing.SHORT, { on ->
-                                    vm.edit { it.setTiming(if (on) Timing.SHORT else Timing.NORMAL) }
-                                }, enabled = !state.enabled)
+                        phase.ringing -> {
+                            var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+                            LaunchedEffect(Unit) { while (true) { now = System.currentTimeMillis(); delay(1000) } }
+                            state.owner?.label?.takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.headlineSmall) }
+                            Text("STEP ${phase.step} / 4　${phase.label}", style = MaterialTheme.typography.titleLarge)
+                            Text(localTime(now).format(DateTimeFormatter.ofPattern("HH:mm")), style = MaterialTheme.typography.displayLarge)
+                            Heading(phase.prompt)
+                            LinearProgressIndicator(progress = { (phase.step - 1) / 4f }, modifier = Modifier.fillMaxWidth())
+                            if (state.escalated) Text("認証を待っています", color = MaterialTheme.colorScheme.error)
+                            BigButton("${phase.place?.title}のQRコードを読む") {
+                                vm.edit(onSaved = { scanning = scanRoute }) {
+                                    if (it.stepId != state.stepId) throw InputError("認証の段階が変わりました。")
+                                    it.beginScan()
+                                }
+                            }
+                            if (phase == Phase.INITIAL_ALARM && !state.snoozeUsed) {
+                                OutlinedButton(onClick = { vm.edit { it.snooze(state.stepId, System.currentTimeMillis()) } }) {
+                                    Text("5分スヌーズ（1回）")
+                                }
                             }
                         }
-                        Text(Place.entries.joinToString("　") { it.title + if (state.registered(it)) " ✓" else " 未登録" })
-                        if (state.lastAbort != 0L) Text("直近の緊急停止　${stamp(state.lastAbort)}")
-                        if (phase == Phase.COMPLETED) TextButton(onClick = { seenCompletion = 0 }) { Text("起床確認結果を見る") }
+                        phase == Phase.SNOOZED -> {
+                            Heading("スヌーズ中")
+                            Text("${stamp(state.deadline)} にもう一度鳴ります。次は洗面所のQR認証です。")
+                        }
+                        phase.waiting -> {
+                            val now by produceState(System.currentTimeMillis(), state.deadline) {
+                                while (true) { value = System.currentTimeMillis(); delay(500) }
+                            }
+                            val target = if (phase == Phase.WAITING_FIRST_CHALLENGE) Place.KITCHEN else Place.BATHROOM
+                            Heading(phase.label)
+                            Text("次の確認まで " + durationText((state.deadline - now + 999).coerceAtLeast(0)),
+                                style = MaterialTheme.typography.headlineMedium)
+                            LinearProgressIndicator(progress = { phase.step / 4f }, modifier = Modifier.fillMaxWidth())
+                            Text(if (controller.exact) "次は${target.title}のQR認証です。画面を閉じても起床確認は続きます。"
+                                else "予約は保留中です。下の設定から正確なアラームを許可してください。")
+                        }
+                        complete -> {
+                            Heading("起床プロトコル完了")
+                            Text("アラーム開始　${stamp(state.started)}")
+                            Text("初回2地点認証　${stamp(state.qrDone)}")
+                            Text("起床確認・キッチン　${stamp(state.firstDone)}")
+                            Text("最終確認・洗面所　${stamp(state.finished)}")
+                            Text("全体の所要時間　" + if (state.finished >= state.started) durationText(state.finished - state.started) else "端末時刻変更のため不明")
+                            BigButton("ホームへ") { back() }
+                        }
+                        page == "sound" -> {
+                            val defaultSound by vm.sound.collectAsStateWithLifecycle()
+                            val card = state.alarms.find { it.id == soundTarget }
+                            val current = if (soundTarget == null) defaultSound else card?.sound
+                            Text(card?.label?.ifBlank { clockText(card.minute) } ?: "新規アラームの初期設定")
+                            current?.let { SoundSettings(it) { uri, document -> vm.selectSound(uri, document, soundTarget) } }
+                            TextButton(onClick = { back() }) { Text("アラーム一覧に戻る") }
+                        }
+                        register -> {
+                            QrManagement(this@MainActivity, state, qrViewModel, scan = { p ->
+                                vm.message.value = null
+                                scanning = "reg" + p.name
+                            }, home = { back() })
+                        }
+                        else -> {
+                            Heading("アラーム")
+                            val next = state.nextCard
+                            Text(if (next == null) "次のアラームはありません" else "次のアラーム　${stamp(next.due)}")
+                            if (next != null && !controller.exact) Text("予約は権限の許可待ちです。", color = MaterialTheme.colorScheme.error)
+                            if (state.alarms.isEmpty()) Text("＋でアラームを追加できます。")
+                            if (Place.entries.any { !state.registered(it) }) Text("アラームをオンにするには2地点のQRを登録してください。")
+                            state.alarms.sortedWith(compareBy(ClockAlarm::minute, ClockAlarm::id)).forEach { card ->
+                                key(card.id) {
+                                    AlarmCard(card, expanded == card.id, expand = { expanded = if (expanded == card.id) null else card.id },
+                                        edit = { change -> vm.edit { it.modifyCard(card.id, change) } },
+                                        sound = { vm.message.value = null; soundTarget = card.id; page = "sound" },
+                                        remove = { vm.removeAlarm(card.id) })
+                                }
+                            }
+                            OutlinedButton(onClick = { vm.message.value = null; soundTarget = null; page = "sound" }) {
+                                Text("初期のアラーム音・端末音量")
+                            }
+                            BigButton("QRコード管理") { vm.message.value = null; qrViewModel.notice = ""; page = "qr" }
+                            if (BuildConfig.DEBUG) {
+                                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                                    Text("短時間テスト（30秒・20秒）")
+                                    Switch(state.timing == Timing.SHORT, { on ->
+                                        vm.edit { it.setTiming(if (on) Timing.SHORT else Timing.NORMAL) }
+                                    }, enabled = state.alarms.none { it.enabled })
+                                }
+                            }
+                            Text(Place.entries.joinToString("　") { it.title + if (state.registered(it)) " ✓" else " 未登録" })
+                            if (state.lastAbort != 0L) Text("直近の緊急停止　${stamp(state.lastAbort)}")
+                            if (phase == Phase.COMPLETED) TextButton(onClick = { seenCompletion = 0 }) { Text("起床確認結果を見る") }
+                        }
                     }
-                }
-                if (active) {
-                    OutlinedButton(onClick = { abortDialog = true }, modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp)) { Text("緊急停止") }
-                }
-                if ((!active && page == "home" && !complete) || (active && (!controller.exact || !controller.alerts.notifications))) {
-                    HorizontalDivider()
-                    Text("権限の状態", style = MaterialTheme.typography.titleLarge)
-                    PermissionLine("正確なアラーム", controller.exact) {
-                        if (Build.VERSION.SDK_INT >= 31) openSettings(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM)
+                    if (active) {
+                        OutlinedButton(onClick = { abortDialog = true }, modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp)) { Text("緊急停止") }
                     }
-                    PermissionLine("通知", controller.alerts.notifications) {
-                        if (!notifyGranted && Build.VERSION.SDK_INT >= 33 && shouldShowRequestPermissionRationale(Manifest.permission.POST_NOTIFICATIONS))
-                            notify.launch(Manifest.permission.POST_NOTIFICATIONS)
-                        else openSettings(Settings.ACTION_APP_NOTIFICATION_SETTINGS, false)
+                    if ((!active && page == "home" && !complete) || (active && (!controller.exact || !controller.alerts.notifications))) {
+                        HorizontalDivider()
+                        Text("権限の状態", style = MaterialTheme.typography.titleLarge)
+                        PermissionLine("正確なアラーム", controller.exact) {
+                            if (Build.VERSION.SDK_INT >= 31) openSettings(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM)
+                        }
+                        PermissionLine("通知", controller.alerts.notifications) {
+                            if (!notifyGranted && Build.VERSION.SDK_INT >= 33 && shouldShowRequestPermissionRationale(Manifest.permission.POST_NOTIFICATIONS))
+                                notify.launch(Manifest.permission.POST_NOTIFICATIONS)
+                            else openSettings(Settings.ACTION_APP_NOTIFICATION_SETTINGS, false)
+                        }
+                        if (!notifyGranted && Build.VERSION.SDK_INT >= 33)
+                            TextButton(onClick = { notify.launch(Manifest.permission.POST_NOTIFICATIONS) }) { Text("通知を許可") }
+                        PermissionLine("ロック画面の全画面通知", controller.alerts.fullScreen) {
+                            if (Build.VERSION.SDK_INT >= 34) openSettings(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT)
+                        }
+                        PermissionLine("カメラ", cameraGranted) { openSettings(Settings.ACTION_APPLICATION_DETAILS_SETTINGS) }
                     }
-                    if (!notifyGranted && Build.VERSION.SDK_INT >= 33)
-                        TextButton(onClick = { notify.launch(Manifest.permission.POST_NOTIFICATIONS) }) { Text("通知を許可") }
-                    PermissionLine("ロック画面の全画面通知", controller.alerts.fullScreen) {
-                        if (Build.VERSION.SDK_INT >= 34) openSettings(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT)
-                    }
-                    PermissionLine("カメラ", cameraGranted) { openSettings(Settings.ACTION_APPLICATION_DETAILS_SETTINGS) }
+                    if (showList) Spacer(Modifier.height(76.dp))
                 }
             }
+            if (showList) FloatingActionButton(onClick = { adding = true },
+                modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 12.dp)
+                    .semantics { contentDescription = "アラームを追加" }) {
+                Text("＋", style = MaterialTheme.typography.headlineMedium)
+            }
+        }
+        if (adding && showList) AlarmTimeDialog(420, { adding = false }) { minute ->
+            adding = false
+            vm.addAlarm(minute) { expanded = it }
         }
         if (active && abortDialog) AlertDialog(
             onDismissRequest = { abortDialog = false }, title = { Text("起床確認を中止しますか？") },
-            text = { Text("音と予約を停止し、緊急停止として記録します。") },
+            text = { Text("この回の音と起床確認を停止します。他のアラームと次回の繰り返し予約は有効です。") },
             confirmButton = { TextButton(onClick = {
                 abortDialog = false
                 scanning = null
-                vm.edit { it.abort(System.currentTimeMillis()) }
+                vm.edit {
+                    if (it.generation != state.generation) throw InputError("別のアラームが始まりました。")
+                    it.abort(System.currentTimeMillis())
+                }
             }) { Text("緊急停止する") } },
             dismissButton = { TextButton(onClick = { abortDialog = false }) { Text("続ける") } }
         )
@@ -268,41 +302,4 @@ fun BigButton(text: String, action: () -> Unit) {
 private fun PermissionLine(name: String, allowed: Boolean, settings: () -> Unit) {
     if (allowed) Text("$name　許可済み")
     else OutlinedButton(onClick = settings) { Text("$name　設定を開く") }
-}
-
-@Composable
-private fun AlarmSettings(activity: Activity, state: WakeState, save: (Long) -> Unit) {
-    val suggested = remember {
-        if (state.date > System.currentTimeMillis()) localTime(state.date)
-        else {
-            val six = LocalDate.now().atTime(6, 0)
-            if (six > LocalDateTime.now()) six else six.plusDays(1)
-        }
-    }
-    var day by rememberSaveable { mutableLongStateOf(suggested.toLocalDate().toEpochDay()) }
-    var minutes by rememberSaveable { mutableIntStateOf(suggested.hour * 60 + suggested.minute) }
-    var warning by rememberSaveable { mutableStateOf("") }
-    val date = LocalDate.ofEpochDay(day)
-    val local = date.atStartOfDay().plusMinutes(minutes.toLong())
-    Heading("アラーム設定")
-    Text("現在の予約　" + if (state.enabled) stamp(state.date) else "なし")
-    BigButton(date.format(DateTimeFormatter.ofPattern("yyyy年M月d日"))) {
-        DatePickerDialog(activity, { _, year, month, d -> day = LocalDate.of(year, month + 1, d).toEpochDay(); warning = "" },
-            date.year, date.monthValue - 1, date.dayOfMonth).show()
-    }
-    BigButton(local.format(DateTimeFormatter.ofPattern("HH:mm"))) {
-        TimePickerDialog(activity, { _, hour, minute -> minutes = hour * 60 + minute; warning = "" },
-            local.hour, local.minute, true).show()
-    }
-    Text("次回鳴動予定　" + local.format(DateTimeFormatter.ofPattern("MM/dd HH:mm")))
-    if (warning.isNotEmpty()) Text(warning, color = MaterialTheme.colorScheme.error)
-    BigButton("保存してオンにする") {
-        val zone = ZoneId.systemDefault()
-        val at = local.atZone(zone).toInstant().toEpochMilli()
-        when {
-            zone.rules.getValidOffsets(local).isEmpty() -> warning = "夏時間の切り替えで存在しない時刻です。"
-            at <= System.currentTimeMillis() -> warning = "過去の日時です。現在より後を選んでください。"
-            else -> save(at)
-        }
-    }
 }

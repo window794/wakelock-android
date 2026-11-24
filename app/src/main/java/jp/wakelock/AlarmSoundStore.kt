@@ -10,12 +10,13 @@ import androidx.datastore.preferences.core.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
-internal data class AlarmSound(val uri: String? = null, val name: String = "端末のデフォルト", val document: Boolean = false)
+data class AlarmSound(val uri: String? = null, val name: String = "端末のデフォルト", val document: Boolean = false)
 
 internal object SoundRecord {
     private val uri = stringPreferencesKey("alarmSoundUri")
@@ -46,7 +47,7 @@ internal class AlarmSoundStore(private val context: Context) {
     private val lock = Mutex()
     private val readFlag = Intent.FLAG_GRANT_READ_URI_PERMISSION
 
-    suspend fun select(uri: Uri?, document: Boolean) = lock.withLock {
+    suspend fun select(uri: Uri?, document: Boolean, alarmId: String? = null) = lock.withLock {
         // Finish the grant and its DataStore write together, even if the settings page is closed.
         withContext(NonCancellable + Dispatchers.IO) {
             val selected = if (uri == null || (!document && RingtoneManager.isDefault(uri))) AlarmSound() else {
@@ -56,18 +57,32 @@ internal class AlarmSoundStore(private val context: Context) {
             val needsGrant = selected.document && uri != null &&
                 resolver.persistedUriPermissions.none { it.uri == uri && it.isReadPermission }
             if (needsGrant) resolver.takePersistableUriPermission(requireNotNull(uri), readFlag)
-            var previous = AlarmSound()
             try {
                 context.wakeData.edit { prefs ->
-                    previous = SoundRecord.read(prefs)
-                    SoundRecord.write(prefs, selected)
+                    val before = AlarmRecords.read(prefs)
+                    val after = if (alarmId == null) before else before.modifyCard(alarmId) { it.copy(sound = selected) }
+                    AlarmRecords.write(prefs, after)
+                    if (alarmId == null) SoundRecord.write(prefs, selected)
                 }
             } catch (failure: Exception) {
                 if (needsGrant) releaseGrant(uri.toString())
                 throw failure
             }
-            previous.uri?.takeIf { previous.document && it != selected.uri }?.let(::releaseGrant)
+            pruneUnusedAudioGrants()
         }
+    }
+
+    suspend fun afterDeletion() = lock.withLock {
+        withContext(Dispatchers.IO) { pruneUnusedAudioGrants() }
+    }
+
+    // Audio documents are the only persistable permissions the app requests.
+    private suspend fun pruneUnusedAudioGrants() {
+        val prefs = context.wakeData.data.first()
+        val retained = (AlarmRecords.read(prefs).alarms.map { it.sound } + SoundRecord.read(prefs))
+            .mapNotNullTo(mutableSetOf()) { it.uri }
+        resolver.persistedUriPermissions.filter { it.isReadPermission && it.uri.toString() !in retained }
+            .forEach { releaseGrant(it.uri.toString()) }
     }
 
     private fun releaseGrant(value: String) {

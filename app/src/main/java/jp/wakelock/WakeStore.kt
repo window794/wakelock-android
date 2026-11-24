@@ -77,9 +77,11 @@ internal object WakeRecord {
 }
 
 class WakeStore(private val context: Context) {
-    val states = context.wakeData.data.map(WakeRecord::read)
-    suspend fun change(transform: (WakeState) -> WakeState): WakeState {
-        val data = context.wakeData.edit { prefs -> WakeRecord.write(prefs, transform(WakeRecord.read(prefs))) }
-        return WakeRecord.read(data)
+    val states = context.wakeData.data.map(AlarmRecords::read)
+    suspend fun change(transform: (WakeState) -> WakeState) = edit { state, _ -> transform(state) }
+
+    internal suspend fun edit(transform: (WakeState, Preferences) -> WakeState): WakeState {
+        val data = context.wakeData.edit { prefs -> AlarmRecords.write(prefs, transform(AlarmRecords.read(prefs), prefs)) }
+        return AlarmRecords.read(data)
     }
 }
