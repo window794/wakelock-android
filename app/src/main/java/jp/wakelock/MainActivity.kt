@@ -34,13 +34,54 @@ class MainActivity : ComponentActivity() {
     private val vm: WakeViewModel by viewModels()
     private val qrViewModel: QrViewModel by viewModels()
     private var resumeCount by mutableIntStateOf(0)
+    private var pendingExport: HistoryRange? = null
+    private val csvDocument = registerForActivityResult(ActivityResultContracts.CreateDocument("text/csv")) { uri ->
+        val range = pendingExport
+        pendingExport = null
+        if (uri != null && range != null) vm.exportCsv(uri, range)
+    }
+
+    private fun chooseCsv(range: HistoryRange, filename: String) {
+        pendingExport = range
+        try {
+            csvDocument.launch(filename)
+        } catch (_: RuntimeException) {
+            pendingExport = null
+            vm.exportNotice = "保存先を開けませんでした。"
+        }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        pendingExport?.let {
+            outState.putBoolean("csv.pending", true)
+            outState.putString("csv.from", it.from?.toString())
+            outState.putString("csv.through", it.through?.toString())
+        }
+    }
     override fun onResume() {
         super.onResume()
         resumeCount++
         vm.refresh()
     }
+    override fun onStop() {
+        if (!isChangingConfigurations) vm.result.dismiss()
+        super.onStop()
+    }
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.action == Intent.ACTION_MAIN || intent.action == Alerts.OPEN_ALARM) {
+            vm.result.dismiss()
+            vm.page = "home"
+        }
+    }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (savedInstanceState?.getBoolean("csv.pending") == true) {
+            pendingExport = HistoryRange(savedInstanceState.getString("csv.from")?.let(LocalDate::parse),
+                savedInstanceState.getString("csv.through")?.let(LocalDate::parse))
+        }
         setContent {
             val colors = if (isSystemInDarkTheme()) darkColorScheme(primary = Color(0xFF9DD6C6))
                 else lightColorScheme(primary = Color(0xFF146453))
@@ -80,14 +121,13 @@ class MainActivity : ComponentActivity() {
         val phase = state.phase
         val active = phase.active
         val controller = vm.controller
-        var page by rememberSaveable { mutableStateOf("home") }
+        var page by vm::page
         var soundTarget by rememberSaveable { mutableStateOf<String?>(null) }
         var expanded by rememberSaveable { mutableStateOf<String?>(null) }
         var adding by rememberSaveable { mutableStateOf(false) }
         var scanning by rememberSaveable { mutableStateOf<String?>(null) }
         var abortDialog by rememberSaveable(state.generation) { mutableStateOf(false) }
-        var seenCompletion by rememberSaveable { mutableLongStateOf(0L) }
-        val complete = phase == Phase.COMPLETED && state.finished != seenCompletion
+        val complete = vm.result.visible(state)
         val register = !active && page == "qr"
         val scanStep = StepId(state.generation, if (phase == Phase.INITIAL_ALARM) Phase.AWAITING_BATHROOM_QR else phase)
         val scanRoute = "auth/${scanStep.generation}/${scanStep.phase.name}"
@@ -111,17 +151,29 @@ class MainActivity : ComponentActivity() {
             vm.message.value = null
             when {
                 scanning != null -> scanning = null
-                complete -> seenCompletion = state.finished
+                complete -> vm.result.dismiss()
                 else -> page = "home"
             }
         }
         BackHandler(scanning != null || complete || (!active && page != "home")) { back() }
 
+        val skippedAt = state.alarms.map { it.skipAt }.filter { it > 0 }.minOrNull()
+        LaunchedEffect(skippedAt, resumeCount) {
+            if (skippedAt != null) {
+                delay((skippedAt - System.currentTimeMillis()).coerceAtLeast(0))
+                vm.refresh()
+            }
+        }
+        if (!active && !complete && page == "history") {
+            HistoryScreen(vm, ::chooseCsv) { page = "home" }
+            return
+        }
         val showList = !active && !complete && page == "home"
         Box(Modifier.fillMaxSize()) {
             key(phase, page, validPlace) {
                 Column(Modifier.fillMaxSize().safeDrawingPadding().verticalScroll(rememberScrollState()).padding(24.dp),
                     verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    if (showList && vm.exportNotice.isNotEmpty()) Text(vm.exportNotice)
                     if (message != null) Text(message.orEmpty(), color = MaterialTheme.colorScheme.error)
                     if (BuildConfig.DEBUG && state.timing == Timing.SHORT)
                         Text("デバッグ短時間モード", color = MaterialTheme.colorScheme.tertiary)
@@ -131,7 +183,7 @@ class MainActivity : ComponentActivity() {
                             if (cameraGranted) {
                                 QrScanner(this@MainActivity, validPlace) { raw ->
                                     scanning = null
-                                    vm.edit { if (register) it.register(validPlace, raw) else it.verify(scanStep, raw, System.currentTimeMillis()) }
+                                    if (register) vm.edit { it.register(validPlace, raw) } else vm.verify(scanStep, raw)
                                 }
                             } else {
                                 Text("QRコードの読み取りにはカメラの許可が必要です。")
@@ -212,7 +264,9 @@ class MainActivity : ComponentActivity() {
                                     AlarmCard(card, expanded == card.id, expand = { expanded = if (expanded == card.id) null else card.id },
                                         edit = { change -> vm.edit { it.modifyCard(card.id, change) } },
                                         sound = { vm.message.value = null; soundTarget = card.id; page = "sound" },
-                                        remove = { vm.removeAlarm(card.id) })
+                                        remove = { vm.removeAlarm(card.id) }, skip = { at, undo ->
+                                        vm.edit { it.skipOccurrence(card.id, at, undo, System.currentTimeMillis(), ZoneId.systemDefault()) }
+                                    })
                                 }
                             }
                             OutlinedButton(onClick = { vm.message.value = null; soundTarget = null; page = "sound" }) {
@@ -230,7 +284,7 @@ class MainActivity : ComponentActivity() {
                             }
                             Text(Place.entries.joinToString("　") { it.title + if (state.registered(it)) " ✓" else " 未登録" })
                             if (state.lastAbort != 0L) Text("直近の緊急停止　${stamp(state.lastAbort)}")
-                            if (phase == Phase.COMPLETED) TextButton(onClick = { seenCompletion = 0 }) { Text("起床確認結果を見る") }
+                            BigButton("起床履歴") { page = "history" }
                         }
                     }
                     if (active) {

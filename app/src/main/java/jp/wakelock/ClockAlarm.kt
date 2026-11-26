@@ -13,17 +13,18 @@ data class ClockAlarm(
     val vibrate: Boolean = true,
     val enabled: Boolean = true,
     val due: Long = 0,
-    val zoneId: String = ZoneId.systemDefault().id
+    val zoneId: String = ZoneId.systemDefault().id,
+    val skipAt: Long = 0
 ) {
     init { require(minute in 0..1439 && days in 0..127) }
 
     fun next(now: Long, zone: ZoneId): ClockAlarm {
         val today = Instant.ofEpochMilli(now).atZone(zone).toLocalDate()
-        for (offset in 0L..7L) {
+        for (offset in 0L..14L) {
             val day = today.plusDays(offset)
             if (days != 0 && days and (1 shl (day.dayOfWeek.value % 7)) == 0) continue
             val at = onDay(day, zone)
-            if (at > now) return copy(due = at, zoneId = zone.id)
+            if (at > now && at != skipAt) return copy(due = at, zoneId = zone.id)
         }
         error("No future occurrence")
     }
@@ -45,8 +46,8 @@ internal fun WakeState.saveCard(card: ClockAlarm, now: Long, zone: ZoneId): Wake
     val old = alarms.find { it.id == card.id }
     if (card.enabled && Place.entries.any { !registered(it) }) throw InputError("先に2地点のQRコードを登録してください。")
     val updated = when {
-        !card.enabled -> card.copy(due = 0)
-        old == null || !old.enabled || old.minute != card.minute || old.days != card.days -> card.next(now, zone)
+        !card.enabled -> card.copy(due = 0, skipAt = 0)
+        old == null || !old.enabled || old.minute != card.minute || old.days != card.days -> card.copy(skipAt = 0).next(now, zone)
         else -> card.copy(due = old.due, zoneId = old.zoneId)
     }
     val cards = if (old == null) (alarms + updated).sortedBy { it.id }
@@ -70,7 +71,7 @@ internal fun WakeState.deliverClock(delivery: AlarmEvent, now: Long): WakeState 
     val card = nextCard ?: return this
     val startedState = copy(date = card.due, enabled = true, phase = Phase.IDLE,
         ownerId = card.id, generation = generation + 1, snoozeUsed = false,
-        alarms = alarms.map { if (it.id == card.id) it.copy(enabled = it.days != 0, due = 0) else it })
+        alarms = alarms.map { if (it.id == card.id) it.copy(enabled = it.days != 0, due = 0, skipAt = it.skipAt.takeIf { target -> target > now } ?: 0) else it })
     return startedState.fire(startedState.event, now)
 }
 
@@ -88,7 +89,17 @@ internal fun WakeState.snooze(step: StepId, now: Long): WakeState {
     return copy(phase = Phase.SNOOZED, snoozeUsed = true, escalated = false, deadline = now + 300_000)
 }
 
-internal fun WakeState.recalculate(now: Long, zone: ZoneId, clockChanged: Boolean): WakeState = copy(alarms = alarms.map {
+internal fun WakeState.skipOccurrence(id: String, expected: Long, undo: Boolean, now: Long, zone: ZoneId): WakeState {
+    val card = alarms.find { it.id == id } ?: throw InputError("アラームが削除されました。")
+    if (phase.active || !card.enabled || card.days == 0 || expected <= now || card.zoneId != zone.id ||
+        (if (undo) card.skipAt != expected else card.due != expected || card.skipAt > now))
+        throw InputError("予約が変わりました。次の予定を確認してください。")
+    val updated = if (undo) card.copy(skipAt = 0, due = minOf(card.due, expected)) else card.copy(skipAt = expected).next(expected, zone)
+    return copy(alarms = alarms.map { if (it.id == id) updated else it })
+}
+
+internal fun WakeState.recalculate(now: Long, zone: ZoneId, clockChanged: Boolean): WakeState = copy(alarms = alarms.map { saved ->
+    val it = if (saved.skipAt != 0L && (saved.skipAt <= now || saved.zoneId != zone.id)) saved.copy(skipAt = 0) else saved
     // Overdue occurrences wait their turn, including across a reboot.
     if (!it.enabled || it.due <= now || (!clockChanged && it.zoneId == zone.id)) it
     else if (it.days != 0) it.next(now, zone)

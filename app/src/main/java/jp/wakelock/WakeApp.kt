@@ -11,6 +11,12 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 class WakeApp : Application() {
+    internal val history by lazy { HistoryStore(this) }
+    override fun onCreate() {
+        super.onCreate()
+        history.start(CoroutineScope(SupervisorJob() + Dispatchers.IO))
+    }
+
     val controller by lazy { WakeController(this) }
     internal val soundStore by lazy { AlarmSoundStore(this) }
 }
@@ -53,8 +59,23 @@ class WakeController(private val app: Context) {
         }
     }
 
+    // If the process dies between DataStore commit and OS side effects, this private delivery
+    // reconciles the committed state. The normal path removes it immediately.
+    private suspend fun reconcileOnCrash(operation: suspend () -> Unit) {
+        val intent = Intent(app, RestoreReceiver::class.java).setAction("jp.wakelock.RECONCILE")
+        val recovery = PendingIntent.getBroadcast(app, 3, intent, PendingIntent.FLAG_IMMUTABLE)
+        manager.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, android.os.SystemClock.elapsedRealtime() + 60_000, recovery)
+        try {
+            operation()
+        } catch (e: InputError) {
+            manager.cancel(recovery)
+            throw e
+        }
+        manager.cancel(recovery)
+    }
+
     suspend fun change(transform: (WakeState) -> WakeState) = lock.withLock {
-        applyState(store.change { transform(it).finishOwner(System.currentTimeMillis(), ZoneId.systemDefault()) })
+        reconcileOnCrash { applyState(store.change { transform(it).finishOwner(System.currentTimeMillis(), ZoneId.systemDefault()) }) }
     }
 
     internal suspend fun addAlarm(id: String, minute: Int) = lock.withLock {
@@ -72,23 +93,25 @@ class WakeController(private val app: Context) {
 
     suspend fun deliver(event: AlarmEvent) = lock.withLock {
         if (states.first().clockEvent != event) return@withLock
-        applyState(store.change { it.deliverClock(event, System.currentTimeMillis()) })
+        reconcileOnCrash { applyState(store.change { it.deliverClock(event, System.currentTimeMillis()) }) }
     }
 
     suspend fun restore(fromBroadcast: Boolean, clockChanged: Boolean = false) = lock.withLock {
         cancel(0, Intent(app, AlarmReceiver::class.java)) // v1 PendingIntent had no action.
         val now = System.currentTimeMillis()
-        val state = store.change {
-            val current = it.recalculate(now, ZoneId.systemDefault(), clockChanged)
-            val event = current.clockEvent
-            if (fromBroadcast || event == null) current else current.deliverClock(event, now)
-        }
-        if (fromBroadcast && state.phase.ringing) {
-            // A boot broadcast cannot start a mediaPlayback FGS directly.
-            setClock(state, state.restoreAt(now))
-            if (!exact) alerts.ringFallback(state.phase)
-        } else {
-            applyState(state)
+        reconcileOnCrash {
+            val state = store.change {
+                val current = it.finishOwner(now, ZoneId.systemDefault()).recalculate(now, ZoneId.systemDefault(), clockChanged)
+                val event = current.clockEvent
+                if (fromBroadcast || event == null) current else current.deliverClock(event, now)
+            }
+            if (fromBroadcast && state.phase.ringing) {
+                // A boot broadcast cannot start a mediaPlayback FGS directly.
+                setClock(state, state.restoreAt(now))
+                if (!exact) alerts.ringFallback(state.phase)
+            } else {
+                applyState(state)
+            }
         }
     }
 

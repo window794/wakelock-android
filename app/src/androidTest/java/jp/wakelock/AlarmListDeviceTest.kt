@@ -1,5 +1,6 @@
 package jp.wakelock
 
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -22,8 +23,9 @@ class AlarmListDeviceTest {
         val initial = saved()
         assumeTrue(initial.alarms.isEmpty() && !initial.phase.active && Place.entries.none(initial::registered))
         ui.onNodeWithContentDescription("アラームを追加").performClick()
-        ui.onNodeWithText("決定").performClick()
-        ui.waitUntil(10_000) { saved().alarms.size == 1 }
+        ui.onNodeWithText("決定").performScrollTo().performSemanticsAction(SemanticsActions.OnClick)
+        ui.waitUntil(10_000) { ui.onAllNodesWithText("07:00").fetchSemanticsNodes().isNotEmpty() }
+        assertEquals(1, saved().alarms.size)
         assertFalse(saved().alarms.single().enabled)
         ui.activityRule.scenario.recreate()
         ui.onNodeWithText("07:00").assertExists()

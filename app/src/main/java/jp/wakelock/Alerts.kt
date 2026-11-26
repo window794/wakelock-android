@@ -28,7 +28,7 @@ class Alerts(private val context: Context) {
         listOf(RING, CHECK, BACKUP).all { manager.getNotificationChannel(it).importance != NotificationManager.IMPORTANCE_NONE }
 
     val openApp: PendingIntent get() = PendingIntent.getActivity(context, 0,
-        Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+        Intent(context, MainActivity::class.java).setAction(OPEN_ALARM).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
         PendingIntent.FLAG_IMMUTABLE)
 
     private fun notice(channel: String, title: String, body: String, full: Boolean): Notification {
@@ -60,6 +60,7 @@ class Alerts(private val context: Context) {
     }
 
     companion object {
+        const val OPEN_ALARM = "jp.wakelock.OPEN_ALARM"
         const val RING_ID = 1
         const val CHECK_ID = 2
         private const val RING = "ring"

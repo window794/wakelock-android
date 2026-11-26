@@ -41,7 +41,9 @@ internal fun AlarmTimeDialog(initial: Int, close: () -> Unit, save: (Int) -> Uni
 
 @Composable
 internal fun AlarmCard(card: ClockAlarm, expanded: Boolean, expand: () -> Unit,
-                       edit: ((ClockAlarm) -> ClockAlarm) -> Unit, sound: () -> Unit, remove: () -> Unit) {
+                       edit: ((ClockAlarm) -> ClockAlarm) -> Unit, sound: () -> Unit, remove: () -> Unit,
+                       skip: (Long, Boolean) -> Unit = { _, _ -> }) {
+    var target by rememberSaveable { mutableLongStateOf(0L) }
     var dialog by rememberSaveable { mutableStateOf("") }
     val time = clockText(card.minute)
     val repeat = weekdays.filterIndexed { day, _ -> card.days and (1 shl day) != 0 }.joinToString("・").ifEmpty { "1回のみ" }
@@ -52,6 +54,7 @@ internal fun AlarmCard(card: ClockAlarm, expanded: Boolean, expand: () -> Unit,
                 Text(time, style = MaterialTheme.typography.displaySmall)
                 if (card.label.isNotBlank()) Text(card.label, style = MaterialTheme.typography.titleMedium)
                 Text(repeat)
+                if (card.skipAt > 0) Text("${stamp(card.skipAt)} はスキップ")
             }
             Switch(card.enabled, { value -> edit { it.copy(enabled = value) } },
                 modifier = Modifier.semantics { contentDescription = "${card.label.ifBlank { time }}のアラーム" })
@@ -84,6 +87,10 @@ internal fun AlarmCard(card: ClockAlarm, expanded: Boolean, expand: () -> Unit,
                 Switch(card.vibrate, { value -> edit { it.copy(vibrate = value) } },
                     modifier = Modifier.semantics { contentDescription = "バイブレーション" })
             }
+            if (card.enabled && card.days != 0 && card.due > 0) {
+                if (card.skipAt > 0) TextButton(onClick = { skip(card.skipAt, true) }) { Text("スキップを取り消す") }
+                else TextButton(onClick = { target = card.due; dialog = "skip" }) { Text("次回だけスキップ") }
+            }
             if (card.enabled && card.due > 0) Text("次回　" + stamp(card.due))
             TextButton(onClick = { dialog = "delete" }) { Text("削除", color = MaterialTheme.colorScheme.error) }
         }
@@ -100,6 +107,10 @@ internal fun AlarmCard(card: ClockAlarm, expanded: Boolean, expand: () -> Unit,
                 confirmButton = { TextButton(onClick = { dialog = ""; edit { it.copy(label = name.trim()) } }) { Text("保存") } },
                 dismissButton = { TextButton(onClick = { dialog = "" }) { Text("キャンセル") } })
         }
+        "skip" -> AlertDialog(onDismissRequest = { dialog = "" }, title = { Text("次回のアラームをスキップ") },
+            text = { Text("${stamp(target)} の1回だけ休み、次の該当曜日から再開します。") },
+            confirmButton = { TextButton(onClick = { dialog = ""; skip(target, false) }) { Text("スキップする") } },
+            dismissButton = { TextButton(onClick = { dialog = "" }) { Text("キャンセル") } })
         "delete" -> AlertDialog(onDismissRequest = { dialog = "" },
             title = { Text("${card.label.ifBlank { time }}を削除しますか？") },
             confirmButton = { TextButton(onClick = { dialog = ""; remove() }) { Text("削除する") } },

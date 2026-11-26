@@ -1,6 +1,7 @@
 package jp.wakelock
 
 import android.content.Context
+import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.*
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.map
@@ -76,12 +77,19 @@ internal object WakeRecord {
     }
 }
 
-class WakeStore(private val context: Context) {
-    val states = context.wakeData.data.map(AlarmRecords::read)
+class WakeStore internal constructor(private val preferences: DataStore<Preferences>,
+                                     private val now: () -> Long = System::currentTimeMillis) {
+    constructor(context: Context) : this(context.wakeData)
+    val states = preferences.data.map(AlarmRecords::read)
     suspend fun change(transform: (WakeState) -> WakeState) = edit { state, _ -> transform(state) }
 
     internal suspend fun edit(transform: (WakeState, Preferences) -> WakeState): WakeState {
-        val data = context.wakeData.edit { prefs -> AlarmRecords.write(prefs, transform(AlarmRecords.read(prefs), prefs)) }
+        val data = preferences.edit { prefs ->
+            val before = AlarmRecords.read(prefs)
+            val after = transform(before, prefs)
+            HistoryJournal.record(prefs, before, after, now())
+            AlarmRecords.write(prefs, after)
+        }
         return AlarmRecords.read(data)
     }
 }

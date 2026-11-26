@@ -17,7 +17,8 @@ internal object AlarmRecords {
                 p[stringPreferencesKey(key + "label")].orEmpty(), AlarmSound(p[stringPreferencesKey(key + "uri")],
                     p[stringPreferencesKey(key + "sound")] ?: AlarmSound().name, p[booleanPreferencesKey(key + "document")] == true),
                 p[booleanPreferencesKey(key + "vibrate")] != false, p[booleanPreferencesKey(key + "enabled")] == true,
-                p[longPreferencesKey(key + "due")] ?: 0, p[stringPreferencesKey(key + "zone")] ?: ZoneId.systemDefault().id)
+                p[longPreferencesKey(key + "due")] ?: 0, p[stringPreferencesKey(key + "zone")] ?: ZoneId.systemDefault().id,
+                p[longPreferencesKey(key + "skipAt")] ?: 0)
         }
         return protocol.copy(alarms = alarms, ownerId = p[owner], snoozeUsed = p[snooze] == true)
     }
@@ -52,6 +53,7 @@ internal object AlarmRecords {
             p[booleanPreferencesKey(key + "enabled")] = card.enabled
             p[longPreferencesKey(key + "due")] = card.due
             p[stringPreferencesKey(key + "zone")] = card.zoneId
+            p[longPreferencesKey(key + "skipAt")] = card.skipAt
         }
     }
 }

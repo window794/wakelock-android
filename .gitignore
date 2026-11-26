@@ -26,3 +26,8 @@ bathroom.png
 bathroom.txt
 kitchen.png
 kitchen.txt
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+wakelock_history_*.csv
