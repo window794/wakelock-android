@@ -22,49 +22,40 @@ class AlarmCardDeviceTest {
     private var card by mutableStateOf(ClockAlarm("test", minute = 420))
     private var removed = false
 
-    private fun showCard() {
+    private fun showEditor() {
         ui.setContent {
-            var expanded by remember { mutableStateOf(false) }
-            MaterialTheme {
-                Column(Modifier.verticalScroll(rememberScrollState())) {
-                    AlarmCard(card, expanded, { expanded = !expanded }, { card = it(card) }, {}, { removed = true })
-                }
-            }
+            AlarmEditor(card, false, Timing.NORMAL, {}, { minute, name, days, vibrate, _, sound ->
+                card = card.copy(minute = minute, label = name, days = days, vibrate = vibrate, sound = sound)
+            }, { removed = true })
         }
-        ui.onNodeWithText("07:00").performClick()
     }
 
-    @Test fun cardEditsDaysNameEnabledAndVibration() {
-        showCard()
-        ui.onNodeWithContentDescription("日曜日").performClick()
+    @Test fun editorAppliesNameDaysAndVibrationOnlyOnSave() {
+        showEditor()
+        ui.onNodeWithContentDescription("日曜日").performScrollTo().performClick()
         ui.onNodeWithContentDescription("土曜日").performClick()
         ui.onNodeWithContentDescription("バイブレーション").performScrollTo().performClick()
-        ui.onNodeWithText("名前　未設定").performScrollTo().performClick()
-        ui.onNode(hasSetTextAction()).performTextReplacement("休日")
+        ui.onNode(hasSetTextAction() and hasText("名前")).performScrollTo().performTextReplacement("休日")
+        ui.runOnIdle { assertEquals(0, card.days); assertTrue(card.vibrate) }
         ui.onNodeWithText("保存").performClick()
-        ui.onNodeWithContentDescription("休日のアラーム").performScrollTo().performClick()
         ui.runOnIdle {
             assertEquals(65, card.days)
             assertEquals("休日", card.label)
-            assertFalse(card.enabled)
             assertFalse(card.vibrate)
         }
     }
 
-    @Test fun timeDialogSupportsKeyboardAndCancelAndDeletionNeedsConfirmation() {
-        showCard()
-        ui.onNodeWithText("時刻を変更　07:00").performClick()
-        ui.onNodeWithText("数字で入力").performSemanticsAction(SemanticsActions.OnClick)
-        ui.onNodeWithText("時計盤を使う").assertExists()
+    @Test fun timeInputSupportsDialAndDeletionNeedsConfirmation() {
+        showEditor()
+        ui.onNodeWithContentDescription("時計盤を使う").performClick()
+        ui.onNodeWithContentDescription("数字で入力").performScrollTo().performClick()
         ui.onAllNodes(hasSetTextAction(), useUnmergedTree = true)[0].performTextReplacement("08")
-        ui.onNodeWithText("決定").performSemanticsAction(SemanticsActions.OnClick)
+        ui.onNodeWithText("保存").performSemanticsAction(SemanticsActions.OnClick)
         ui.runOnIdle { assertEquals(480, card.minute) }
-        ui.onNodeWithText("時刻を変更　08:00").performClick()
-        ui.onNodeWithText("キャンセル").performClick()
-        ui.onNodeWithText("削除").performScrollTo().performClick()
+        ui.onNodeWithText("このアラームを削除").performScrollTo().performClick()
         ui.onNodeWithText("キャンセル").performClick()
         ui.runOnIdle { assertFalse(removed) }
-        ui.onNodeWithText("削除").performClick()
+        ui.onNodeWithText("このアラームを削除").performClick()
         ui.onNodeWithText("削除する").performClick()
         ui.runOnIdle { assertTrue(removed) }
     }

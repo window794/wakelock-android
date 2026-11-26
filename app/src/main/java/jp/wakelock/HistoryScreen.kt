@@ -1,76 +1,169 @@
 package jp.wakelock
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import java.time.*
-import java.time.format.DateTimeFormatter
 
-private val exactTime = DateTimeFormatter.ofPattern("uuuu/MM/dd HH:mm:ss")
-private fun WakeHistory.display(at: Long?) =
-    at?.let { exactTime.format(Instant.ofEpochMilli(it).atZone(ZoneId.of(zone))) } ?: "未記録"
-private fun duration(s: Long?) = s?.let { "${it / 60}分${it % 60}秒" } ?: "未確定"
+private fun WakeHistory.time(at: Long?, pattern: String = "HH:mm:ss") =
+    at?.let { formatted(it, pattern, ZoneId.of(zone)) } ?: "未記録"
+private val WakeHistory.scans get() = listOf(bathroom1, kitchen1, kitchen2, bathroom2)
+private val WakeHistory.statusText get() = when (status) {
+    RunStatus.COMPLETED -> "起床完了"
+    RunStatus.INTERRUPTED -> "途中終了"
+    else -> status.title
+}
 
 @Composable
-internal fun HistoryScreen(vm: WakeViewModel, choose: (HistoryRange, String) -> Unit, home: () -> Unit) {
+private fun StatusIcon(status: RunStatus) {
+    val cs = MaterialTheme.colorScheme
+    val (icon, color) = when (status) {
+        RunStatus.COMPLETED -> Icons.Filled.CheckCircle to cs.primary
+        RunStatus.EMERGENCY_STOPPED -> Icons.Filled.Error to cs.error
+        else -> Icons.Filled.Pending to cs.onSurfaceVariant
+    }
+    Icon(icon, null, Modifier.size(18.dp), tint = color)
+}
+
+@Composable
+internal fun HistoryScreen(vm: WakeViewModel, choose: (HistoryRange, String) -> Unit, tab: (String) -> Unit) {
     val rows by vm.historyRows.collectAsStateWithLifecycle(initialValue = null)
     var detail by rememberSaveable { mutableStateOf<String?>(null) }
     var export by rememberSaveable { mutableStateOf(false) }
-    val row = rows?.find { it.id == detail }
-    fun back() {
-        if (export || detail != null) { export = false; detail = null } else home()
-    }
-    BackHandler { back() }
-    Column(Modifier.fillMaxSize().safeDrawingPadding().padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        TextButton(onClick = { back() }) { Text(if (export || detail != null) "履歴一覧に戻る" else "ホームへ") }
+    var monthValue by rememberSaveable { mutableStateOf(YearMonth.now().toString()) }
+    val month = YearMonth.parse(monthValue)
+    val filtered = remember(rows, month) { rows.orEmpty().filter(HistoryRange.month(month)::contains) }
+    val selected = rows?.find { it.id == detail }
+    fun list() { export = false; detail = null }
+    BackHandler(detail != null || export) { list() }
+    Column(Modifier.fillMaxSize()) {
         if (export) {
-            HistoryExport(vm, choose)
-        } else if (row != null) {
-            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Heading(row.name.ifBlank { "起床履歴" })
-                Text("設定日時　" + row.display(row.scheduled))
-                Text("記録のタイムゾーン　" + row.zone)
-                HorizontalDivider()
-                listOf("アラーム鳴動" to row.ring, "洗面所QR認証" to row.bathroom1, "キッチンQR認証" to row.kitchen1,
-                    "キッチンQR再認証" to row.kitchen2, "洗面所QR最終認証" to row.bathroom2).forEach { (label, at) ->
-                    Text(label, style = MaterialTheme.typography.labelLarge)
-                    Text(row.display(at))
-                }
-                HorizontalDivider()
-                Text(row.status.title, style = MaterialTheme.typography.titleLarge)
-                Text("終了日時　" + row.display(row.ended))
-                Text("所要時間　" + duration(row.seconds))
-                Text("スヌーズ　${row.snoozes}回　／　無応答の強化　" + (row.escalations?.let { "${it}回" } ?: "未記録"))
-            }
+            Bar("CSVエクスポート", ::list)
+            Column(Modifier.padding(16.dp)) { HistoryExport(vm, choose) }
+        } else if (selected != null) {
+            HistoryDetail(selected, ::list)
         } else {
-            Heading("起床履歴")
-            OutlinedButton(onClick = { vm.exportNotice = ""; export = true }) { Text("CSVエクスポート") }
-            if (vm.historyError != null) Text(vm.historyError.orEmpty())
-            else if (rows == null) Text("読み込み中…")
-            else if (rows!!.isEmpty()) Text("起床履歴はまだありません。")
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(rows.orEmpty(), key = { it.id }) { item ->
-                    Card(Modifier.fillMaxWidth().clickable { detail = item.id }) {
-                        Column(Modifier.padding(14.dp)) {
-                            Text(item.display(item.ring), style = MaterialTheme.typography.labelLarge)
-                            Text(item.name.ifBlank { "名前なしのアラーム" }, style = MaterialTheme.typography.titleMedium)
-                            Text("設定　" + item.display(item.scheduled))
-                            Text("${item.status.title}　所要時間　" + duration(item.seconds))
-                        }
+            Bar("起床履歴") { Tool(Icons.Filled.Download,"CSVエクスポート") { vm.exportNotice = ""; export = true } }
+            Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically) {
+                Tool(Icons.Filled.ChevronLeft,"前の月") { monthValue = month.minusMonths(1).toString() }
+                Text("${month.year}年${month.monthValue}月", style = MaterialTheme.typography.titleMedium)
+                Tool(Icons.Filled.ChevronRight,"次の月") { monthValue = month.plusMonths(1).toString() }
+            }
+            val times = filtered.filter { it.status == RunStatus.COMPLETED }.mapNotNull { it.seconds }
+            if (times.isNotEmpty()) Panel(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                Row {
+                    for ((label,value) in listOf("起床完了" to filtered.count { it.status == RunStatus.COMPLETED }.toString(),
+                        "緊急停止" to filtered.count { it.status == RunStatus.EMERGENCY_STOPPED }.toString(),
+                        "平均所要" to "${(times.average() / 60).toInt()}分")) {
+                        Column(Modifier.weight(1f)) { Text(value, style = MaterialTheme.typography.headlineSmall); Text(label, style = MaterialTheme.typography.labelMedium) }
                     }
                 }
             }
+            if (filtered.isEmpty()) Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(Icons.Filled.History, null, Modifier.size(48.dp))
+                    Text(vm.historyError ?: if (rows == null) "読み込み中…" else "起床履歴はまだありません")
+                }
+            } else LazyColumn(Modifier.weight(1f)) {
+                items(filtered, key = { it.id }) { row ->
+                    val cs = MaterialTheme.colorScheme
+                    val last = row.scans.indexOfLast { it != null } + 1
+                    Row(Modifier.fillMaxWidth().clickable { detail = row.id }.heightIn(min = 88.dp).padding(horizontal = 16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.size(40.dp).background(cs.secondaryContainer, CircleShape), contentAlignment = Alignment.Center) {
+                            Text(row.time(row.ring, "d"))
+                        }
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text("${row.time(row.ring, "E")} ・ ${row.time(row.scheduled,"HH:mm")} ${row.name}")
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                StatusIcon(row.status)
+                                Text(" ${row.statusText}" + when {
+                                    row.status == RunStatus.COMPLETED -> " ・ " + elapsedText(row.seconds)
+                                    last > 0 -> " ・ ステップ${last}まで確認"
+                                    else -> ""
+                                }, style = MaterialTheme.typography.bodyMedium)
+                            }
+                            ProtocolTrack(last, compact = true, modifier = Modifier.width(160.dp), reached = row.scans.map { it != null })
+                        }
+                        Icon(Icons.Filled.ChevronRight,null)
+                    }
+                }
+            }
+            Tabs("history", tab)
         }
+    }
+}
+
+@Composable
+private fun HistoryDetail(row: WakeHistory, back: () -> Unit) {
+    val cs = MaterialTheme.colorScheme
+    Bar(row.time(row.ring, "M月d日（E）"), back)
+    Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            StatusIcon(row.status)
+            Text(" ${row.statusText}", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+            Text("予定 ${row.time(row.scheduled,"HH:mm")} ・ ${row.name}", style = MaterialTheme.typography.bodyMedium)
+        }
+        Panel {
+            Row {
+                Metric("初回アラーム", row.time(row.ring), Modifier.weight(1f))
+                Metric(if (row.status == RunStatus.COMPLETED) "起床完了" else "終了", row.time(row.ended), Modifier.weight(1f))
+            }
+            Spacer(Modifier.height(12.dp))
+            Row {
+                Metric("所要時間", elapsedText(row.seconds), Modifier.weight(1f))
+                Metric("スヌーズ・緊急停止", "${row.snoozes}回 ・ " + if (row.status == RunStatus.EMERGENCY_STOPPED) "あり" else "なし", Modifier.weight(1f))
+            }
+        }
+        Text("経過", Modifier.padding(top = 16.dp), style = MaterialTheme.typography.titleSmall, color = cs.primary)
+        val events = listOf(row.ring) + row.scans
+        val visible = events.indices.filter { events[it] != null }
+        visible.forEachIndexed { order, index ->
+            val at = requireNotNull(events[index])
+            val previous = events.getOrNull(index - 1)
+            val subtitle = if (index == 0) row.name else previous?.takeIf { it <= at }?.let {
+                (if (index == 1) "鳴動から " else "前の認証から ") + elapsedText((at - it) / 1000)
+            }.orEmpty()
+            TimelineLine(eventLabels[index], subtitle, row.time(at), order > 0, order < visible.lastIndex || row.status != RunStatus.IN_PROGRESS) {
+                if (index == 0) Badge(Icons.Filled.Alarm,cs.secondaryContainer,cs.onSecondaryContainer) else PlaceBadge(protocolPlaces[index - 1])
+            }
+        }
+        if (row.status != RunStatus.IN_PROGRESS) TimelineLine(row.statusText, elapsedText(row.seconds),row.time(row.ended), true, false) {
+            val emergency = row.status == RunStatus.EMERGENCY_STOPPED
+            Badge(if (emergency) Icons.Filled.Error else if (row.status == RunStatus.COMPLETED) Icons.Filled.Check else Icons.Filled.Pending,
+                if (emergency) cs.error else cs.primary, if (emergency) cs.onError else cs.onPrimary)
+        }
+        Text("無応答の強化　" + (row.escalations?.let { "${it}回" } ?: "未記録") + "　・　" + row.zone,
+            style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+@Composable
+private fun TimelineLine(label: String, subtitle: String, time: String, before: Boolean, after: Boolean, badge: @Composable () -> Unit) {
+    Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min).heightIn(min = 64.dp), verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+        Box(Modifier.width(40.dp).fillMaxHeight(), contentAlignment = Alignment.Center) {
+            Column(Modifier.fillMaxHeight().width(2.dp)) {
+                Spacer(Modifier.weight(1f).fillMaxWidth().then(if (before) Modifier.background(MaterialTheme.colorScheme.outlineVariant) else Modifier))
+                Spacer(Modifier.weight(1f).fillMaxWidth().then(if (after) Modifier.background(MaterialTheme.colorScheme.outlineVariant) else Modifier))
+            }
+            badge()
+        }
+        Column(Modifier.weight(1f)) { Text(label); if (subtitle.isNotBlank()) Text(subtitle, style = MaterialTheme.typography.bodyMedium) }
+        Text(time, style = MaterialTheme.typography.labelLarge)
     }
 }
 
@@ -88,7 +181,6 @@ private fun HistoryExport(vm: WakeViewModel, choose: (HistoryRange, String) -> U
         }
     }.getOrNull()
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Heading("CSVエクスポート")
         Text("初回鳴動の日付で絞り込みます。")
         for (choice in listOf("全期間", "月指定", "日付範囲")) {
             FilterChip(mode == choice, { mode = choice }, label = { Text(choice) })

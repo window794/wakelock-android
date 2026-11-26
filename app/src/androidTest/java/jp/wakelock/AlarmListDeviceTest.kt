@@ -23,15 +23,14 @@ class AlarmListDeviceTest {
         val initial = saved()
         assumeTrue(initial.alarms.isEmpty() && !initial.phase.active && Place.entries.none(initial::registered))
         ui.onNodeWithContentDescription("アラームを追加").performClick()
-        ui.onNodeWithText("決定").performScrollTo().performSemanticsAction(SemanticsActions.OnClick)
+        ui.onNodeWithText("保存").performSemanticsAction(SemanticsActions.OnClick)
         ui.waitUntil(10_000) { ui.onAllNodesWithText("07:00").fetchSemanticsNodes().isNotEmpty() }
         assertEquals(1, saved().alarms.size)
         assertFalse(saved().alarms.single().enabled)
         ui.activityRule.scenario.recreate()
         ui.onNodeWithText("07:00").assertExists()
-        if (ui.onAllNodesWithText("削除").fetchSemanticsNodes().isEmpty())
-            ui.onNodeWithText("07:00").performScrollTo().performClick()
-        ui.onNodeWithText("削除").performScrollTo().performClick()
+        ui.onNodeWithText("07:00").performClick()
+        ui.onNodeWithText("このアラームを削除").performScrollTo().performClick()
         ui.onNodeWithText("削除する").performClick()
         ui.waitUntil(10_000) { saved().alarms.isEmpty() }
         assertNull(saved().clockEvent)

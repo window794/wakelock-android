@@ -25,7 +25,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.*
 import kotlin.math.roundToInt
 
-private class SoundPreview(context: Context, scope: CoroutineScope) {
+internal class SoundPreview(context: Context, scope: CoroutineScope) {
     private val player = alarmPlayer(context, scope)
     private val manager = context.getSystemService(AudioManager::class.java)
     private var request: AudioFocusRequest? = null
@@ -131,7 +131,6 @@ internal fun SoundSettings(sound: AlarmSound, select: (Uri?, Boolean) -> Unit) {
     val document = rememberLauncherForActivityResult(openLocalAudio) { uri ->
         if (uri != null) choose(uri, true)
     }
-    Heading("アラーム音")
     Text("現在のアラーム音", style = MaterialTheme.typography.labelLarge)
     Text(sound.name, style = MaterialTheme.typography.headlineSmall)
     BigButton("端末のアラーム音から選ぶ") {

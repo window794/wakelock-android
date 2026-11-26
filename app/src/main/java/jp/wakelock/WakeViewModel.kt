@@ -49,9 +49,9 @@ class WakeViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    internal fun verify(step: StepId, raw: String) {
+    internal fun verify(step: StepId, raw: String, onFailure: (String) -> Unit = {}) {
         val ticket = result.ticket
-        edit(onSaved = {
+        edit(onFailure = onFailure, onSaved = {
             if (step.phase == Phase.FINAL_CHALLENGE_ACTIVE) result.completed(step.generation, ticket)
         }) { it.verify(step, raw, System.currentTimeMillis()) }
     }
@@ -69,10 +69,10 @@ class WakeViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun edit(onSaved: () -> Unit = {}, transform: (WakeState) -> WakeState) =
-        update(onSaved) { controller.change(transform) }
+    fun edit(onSaved: () -> Unit = {}, onFailure: (String) -> Unit = {}, transform: (WakeState) -> WakeState) =
+        update(onSaved, onFailure) { controller.change(transform) }
 
-    private fun update(onSaved: () -> Unit, action: suspend () -> Unit) {
+    private fun update(onSaved: () -> Unit, onFailure: (String) -> Unit = {}, action: suspend () -> Unit) {
         viewModelScope.launch {
             try {
                 action()
@@ -80,8 +80,11 @@ class WakeViewModel(app: Application) : AndroidViewModel(app) {
                 onSaved()
             } catch (e: InputError) {
                 message.value = e.message
+                onFailure(e.message.orEmpty())
             } catch (_: IOException) {
-                message.value = "端末に保存できませんでした。空き容量を確認してもう一度お試しください。"
+                val explanation = "端末に保存できませんでした。空き容量を確認してもう一度お試しください。"
+                message.value = explanation
+                onFailure(explanation)
             }
         }
     }
@@ -90,8 +93,9 @@ class WakeViewModel(app: Application) : AndroidViewModel(app) {
         update({ onSaved(id) }) { controller.addAlarm(id, minute) }
     }
 
-    internal fun removeAlarm(id: String) {
+    internal fun removeAlarm(id: String, onRemoved: () -> Unit = {}) {
         edit(onSaved = {
+            onRemoved()
             viewModelScope.launch {
                 try { soundStore.afterDeletion() } catch (_: IOException) { /* Retried on the next selection. */ }
             }

@@ -111,14 +111,13 @@ class QrDeviceTest {
         val activity = compose.activity
         val vm = QrViewModel(activity.application)
         compose.setContent {
-            Column(Modifier.verticalScroll(rememberScrollState())) {
-                QrManagement(activity, state, vm, scan = {}, home = {})
-            }
+            QrManagement(activity, state, vm, scan = {}, tab = {})
         }
-        compose.onNodeWithText("洗面所のQRコードを再発行").performScrollTo().performClick()
+        compose.onNodeWithContentDescription("洗面所のその他").performClick()
+        compose.onNodeWithText("再発行…").performClick()
         compose.onNodeWithText("キャンセル").performClick()
         compose.onNodeWithText("再発行する").assertDoesNotExist()
-        compose.onNodeWithText("洗面所のQRコードを表示").performClick()
+        compose.onAllNodesWithText(" 表示・印刷").onFirst().performClick()
         compose.waitUntil(10_000) {
             compose.onAllNodesWithContentDescription("洗面所に設置する印刷用QRコード").fetchSemanticsNodes().size == 1
         }
